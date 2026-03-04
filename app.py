@@ -10,8 +10,8 @@ st.title("📏 광고 소재 사이즈 검수 툴")
 st.caption("업로드하신 소재의 비율을 자동으로 체크합니다.")
 
 # --- [하이퍼링크 추가 섹션] ---
-st.markdown("상세 내용은 [ **[ 광고 소재 가이드 ]** ](https://fastpaepr.myportfolio.com/1696f1f311accb) 확인 부탁드립니다.")
-st.write("") # 약간의 간격을 위해 추가
+st.markdown(f"상세 내용은 [**[ 광고 소재 가이드 ]**](https://fastpaepr.myportfolio.com/1696f1f311accb) 확인 부탁드립니다.")
+st.write("")
 
 # 1. 유형 선택
 option = st.radio("검수할 유형을 선택하세요", ["이미지", "영상", "캐러셀"], horizontal=True)
@@ -93,4 +93,5 @@ st.warning("""
    * 이 내용은 매체 가이드가 아닌 메타 가이드인 점 참고 부탁드립니다.
 3. (추가하실 내용을 여기에 작성하세요)
 """)
+
 
