@@ -53,43 +53,52 @@ if uploaded_files:
     for uploaded_file in uploaded_files:
         file_ext = os.path.splitext(uploaded_file.name)[1].lower()
         
-        # --- 이미지 파일 검수 ---
+        # 비율 계산 함수
+        def get_ratio_str(w, h):
+            r = w / h
+            if abs(r - 0.8) < 0.05: return "4:5"
+            if abs(r - 0.5625) < 0.05: return "9:16"
+            if abs(r - 1.0) < 0.05: return "1:1"
+            if abs(r - 1.77) < 0.1: return "16:9"
+            return f"{w/h:.2f}:1"
+
+        # --- 이미지 및 캐러셀 이미지 검수 ---
         if option == "이미지" or (option == "캐러셀" and file_ext in ['.jpg', '.jpeg', '.png', '.webp']):
             try:
                 with Image.open(uploaded_file) as img:
                     w, h = img.size
-                ratio = w / h
-                
-                if abs(ratio - 0.8) < 0.05: # 4:5 비율
-                    st.success(f"✅ {uploaded_file.name}: 이상없음 ({w}x{h})")
+                r_str = get_ratio_str(w, h)
+                if abs((w/h) - 0.8) < 0.05:
+                    st.success(f"✅ {uploaded_file.name}: 이상없음 ({w}x{h}, {r_str})")
                 else:
-                    st.error(f"❌ {uploaded_file.name} 이미지의 사이즈가 틀립니다. 4:5 사이즈로 수정이 필요합니다. (현재 {w}x{h})")
+                    # 줄바꿈 없이 문구 유지
+                    st.error(f"❌ {uploaded_file.name}: 이미지 사이즈가 틀립니다. 4:5 사이즈로 수정이 필요합니다. (현재 {w}x{h}, {r_str})")
             except Exception:
-                st.error(f"❌ {uploaded_file.name} 파일을 읽는 중 오류가 발생했습니다.")
+                st.error(f"❌ {uploaded_file.name}: 파일을 읽는 중 오류가 발생했습니다.")
 
-        # --- 영상 파일 검수 ---
+        # --- 영상 및 캐러셀 영상 검수 ---
         elif option == "영상" or (option == "캐러셀" and file_ext in ['.mp4', '.mov', '.avi']):
             w, h = get_video_dimensions(uploaded_file, file_ext)
-            
             if w == 0 or h == 0:
-                st.error(f"❌ {uploaded_file.name} 영상 데이터를 읽을 수 없습니다.")
+                st.error(f"❌ {uploaded_file.name}: 영상 데이터를 읽을 수 없습니다.")
                 continue
-
+            
+            r_str = get_ratio_str(w, h)
             ratio = w / h
             
             if option == "영상": # 9:16 기준
                 if abs(ratio - 0.5625) < 0.05:
-                    st.success(f"✅ {uploaded_file.name}: 이상없음 ({w}x{h})")
+                    st.success(f"✅ {uploaded_file.name}: 이상없음 ({w}x{h}, {r_str})")
                 else:
-                    st.warning(f"⚠️ {uploaded_file.name} 사이즈가 {w}:{h}입니다. 9:16 사이즈가 아니므로, 그대로 진행 시 위아래가 잘려 업로드됩니다.")
+                    st.warning(f"⚠️ {uploaded_file.name}: 현재 사이즈가 {w}x{h}({r_str})입니다. 9:16 사이즈가 아니므로, 그대로 진행 시 위아래가 잘려 업로드됩니다.")
             
             elif option == "캐러셀": # 4:5 기준
                 if abs(ratio - 0.8) < 0.05:
-                    st.success(f"✅ {uploaded_file.name}: 이상없음 ({w}x{h})")
-                elif abs(ratio - 1.77) < 0.1: # 16:9 가로형
-                    st.error(f"❌ {uploaded_file.name}: 가로형(16:9) 영상입니다. 위아래 검은색 바를 추가하여 4:5 비율로 수정 후 전달 부탁드립니다. (패스트페이퍼 수정 불가)")
+                    st.success(f"✅ {uploaded_file.name}: 이상없음 ({w}x{h}, {r_str})")
+                elif abs(ratio - 1.77) < 0.1:
+                    st.error(f"❌ {uploaded_file.name}: 가로형(16:9) 영상입니다. 위아래 검은색 바를 추가하여 4:5 비율로 수정 후 전달 부탁드립니다. (패스트페이퍼 수정 불가, 현재 {w}x{h})")
                 else:
-                    st.warning(f"⚠️ {uploaded_file.name}: 4:5 비율이 아닙니다. 그대로 진행 시 위아래가 잘릴 수 있습니다.")
+                    st.warning(f"⚠️ {uploaded_file.name}: 4:5 비율이 아닙니다. 그대로 진행 시 위아래가 잘릴 수 있습니다. (현재 {w}x{h}, {r_str})")
 
 # --- 안내사항 영역 ---
 st.divider()
