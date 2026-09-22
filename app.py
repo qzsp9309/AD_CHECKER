@@ -160,8 +160,14 @@ if uploaded_files:
                         f"(현재 {w}x{h}, {r_str})"
                     )
 
-    # 모든 검수 결과를 한 번에 출력
-    st.text("\n".join(results))
+# 파일별 한 줄 + 복사 시 줄바꿈 유지
+result_text = "\n\n".join(results)
+
+st.code(
+    result_text,
+    language=None,
+    wrap_lines=True
+)
 
 # --- 안내사항 영역 ---
 st.divider()
