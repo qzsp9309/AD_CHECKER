@@ -3,6 +3,7 @@ from PIL import Image
 import cv2
 import tempfile
 import os
+from io import BytesIO
 
 # [안정화 설정] 페이지 설정 및 메모리 효율을 위한 캐시 관리
 st.set_page_config(page_title="소재 규격 검수기", layout="centered")
@@ -120,3 +121,223 @@ st.warning("""
    * 이 내용은 매체 가이드가 아닌 메타 가이드인 점 참고 부탁드립니다.
 """)
 
+# =========================================================
+# 4:5 이미지 자동 크롭
+# =========================================================
+
+st.divider()
+
+st.header("✂️ 4:5 이미지 크롭")
+st.caption(
+    "이미지를 업로드하면 원본 해상도를 확대하지 않고 "
+    "4:5 비율로 자동 크롭합니다."
+)
+
+
+# --- 4:5 크롭 함수 ---
+def crop_image_to_4_5(img, crop_position="중앙"):
+
+    target_ratio = 4 / 5
+
+    w, h = img.size
+    current_ratio = w / h
+
+    # 이미 4:5인 경우
+    if abs(current_ratio - target_ratio) < 0.001:
+        return img.copy()
+
+    # -----------------------------------------
+    # 가로가 넓은 이미지
+    # 좌우를 잘라서 4:5 생성
+    # -----------------------------------------
+    if current_ratio > target_ratio:
+
+        new_width = int(h * target_ratio)
+
+        # 좌우는 중앙 기준으로 크롭
+        left = (w - new_width) // 2
+
+        crop_box = (
+            left,
+            0,
+            left + new_width,
+            h
+        )
+
+    # -----------------------------------------
+    # 세로가 긴 이미지
+    # 위/아래를 잘라서 4:5 생성
+    # -----------------------------------------
+    else:
+
+        new_height = int(w / target_ratio)
+
+        if crop_position == "상단":
+
+            top = 0
+
+        elif crop_position == "하단":
+
+            top = h - new_height
+
+        else:
+            # 중앙
+            top = (h - new_height) // 2
+
+        crop_box = (
+            0,
+            top,
+            w,
+            top + new_height
+        )
+
+    return img.crop(crop_box)
+
+
+# --- 이미지 업로드 ---
+crop_files = st.file_uploader(
+    "크롭할 이미지를 선택하세요",
+    type=["jpg", "jpeg", "png", "webp"],
+    accept_multiple_files=True,
+    key="crop_uploader"
+)
+
+
+# --- 크롭 위치 선택 ---
+crop_position = st.radio(
+    "크롭 기준",
+    ["중앙", "상단", "하단"],
+    horizontal=True,
+    key="crop_position"
+)
+
+
+# --- 이미지 처리 ---
+if crop_files:
+
+    st.subheader("🖼️ 크롭 결과")
+
+    for crop_file in crop_files:
+
+        try:
+
+            file_ext = os.path.splitext(
+                crop_file.name
+            )[1].lower()
+
+            # 이미지 열기
+            img = Image.open(crop_file)
+
+            original_w, original_h = img.size
+
+            # EXIF 회전 정보 적용
+            from PIL import ImageOps
+            img = ImageOps.exif_transpose(img)
+
+            # 실제 회전 적용 후 사이즈 다시 확인
+            original_w, original_h = img.size
+
+            # 4:5 크롭
+            cropped_img = crop_image_to_4_5(
+                img,
+                crop_position
+            )
+
+            new_w, new_h = cropped_img.size
+
+            # 파일 정보 표시
+            st.write(
+                f"**{crop_file.name}**"
+            )
+
+            st.caption(
+                f"원본: {original_w} × {original_h}  →  "
+                f"크롭: {new_w} × {new_h}"
+            )
+
+            # 미리보기
+            st.image(
+                cropped_img,
+                caption=f"{crop_position} 기준 4:5 크롭",
+                use_container_width=True
+            )
+
+            # -----------------------------------------
+            # 다운로드 파일 생성
+            # -----------------------------------------
+
+            buffer = BytesIO()
+
+            original_name = os.path.splitext(
+                crop_file.name
+            )[0]
+
+            # PNG
+            if file_ext == ".png":
+
+                cropped_img.save(
+                    buffer,
+                    format="PNG",
+                    optimize=False
+                )
+
+                download_ext = ".png"
+                mime_type = "image/png"
+
+
+            # WEBP
+            elif file_ext == ".webp":
+
+                cropped_img.save(
+                    buffer,
+                    format="WEBP",
+                    lossless=True,
+                    quality=100,
+                    method=6
+                )
+
+                download_ext = ".webp"
+                mime_type = "image/webp"
+
+
+            # JPG / JPEG
+            else:
+
+                # JPEG은 RGB 필요
+                if cropped_img.mode not in ("RGB", "L"):
+                    cropped_img = cropped_img.convert("RGB")
+
+                cropped_img.save(
+                    buffer,
+                    format="JPEG",
+                    quality=100,
+                    subsampling=0,
+                    optimize=False
+                )
+
+                download_ext = ".jpg"
+                mime_type = "image/jpeg"
+
+
+            buffer.seek(0)
+
+            # 다운로드 버튼
+            st.download_button(
+                label=f"⬇️ {crop_file.name} 다운로드",
+                data=buffer.getvalue(),
+                file_name=f"{original_name}_4x5{download_ext}",
+                mime=mime_type,
+                key=f"download_{crop_file.name}"
+            )
+
+            st.divider()
+
+
+        except Exception as e:
+
+            st.error(
+                f"❌ {crop_file.name}: "
+                f"이미지 처리 중 오류가 발생했습니다."
+            )
+
+            st.caption(str(e))
