@@ -4,7 +4,9 @@ import cv2
 import tempfile
 import os
 import zipfile
+import json
 from io import BytesIO
+import streamlit.components.v1 as components
 
 # [안정화 설정] 페이지 설정 및 메모리 효율을 위한 캐시 관리
 st.set_page_config(page_title="소재 규격 검수기", layout="centered")
@@ -63,12 +65,15 @@ if uploaded_files:
             r = w / h
             if abs(r - 0.8) < 0.05:
                 return "4:5"
+            if abs(r - 0.75) < 0.03:
+                return "3:4"
             if abs(r - 0.5625) < 0.05:
                 return "9:16"
             if abs(r - 1.0) < 0.05:
                 return "1:1"
             if abs(r - 1.77) < 0.1:
                 return "16:9"
+
             return f"{w/h:.2f}:1"
 
         # 이미지 및 캐러셀 이미지
@@ -154,13 +159,60 @@ if uploaded_files:
 
     # 검수 결과 전체 출력
     # 반드시 if uploaded_files: 안쪽에 있어야 함
-    result_text = "\n".join(results)
+# 검수 결과 텍스트
+result_text = "\n".join(results)
 
-    st.code(
-        result_text,
-        language=None,
-        wrap_lines=True
-    )
+# 화면 출력
+st.code(
+    result_text,
+    language=None,
+    wrap_lines=True
+)
+
+# JavaScript에 안전하게 전달
+result_text_json = json.dumps(result_text)
+
+# 복사 버튼
+components.html(
+    f"""
+    <button
+        onclick='copyResults()'
+        style="
+            width: 100%;
+            padding: 10px 15px;
+            background-color: #ffffff;
+            color: #262730;
+            border: 1px solid #d6d6d6;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        "
+        id="copyButton"
+    >
+        📋 검수 결과 복사
+    </button>
+
+    <script>
+        const resultText = {result_text_json};
+
+        function copyResults() {{
+            navigator.clipboard.writeText(resultText).then(function() {{
+
+                const button = document.getElementById("copyButton");
+
+                button.innerText = "✅ 복사 완료";
+
+                setTimeout(function() {{
+                    button.innerText = "📋 검수 결과 복사";
+                }}, 1500);
+
+            }});
+        }}
+    </script>
+    """,
+    height=50
+)
 
 # --- 안내사항 영역 ---
 st.divider()
