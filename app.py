@@ -53,25 +53,28 @@ def get_video_dimensions(file, file_ext):
 if uploaded_files:
     st.subheader("🔍 검수 결과")
 
-    # 모든 검수 결과를 한 곳에 저장
     results = []
 
     for uploaded_file in uploaded_files:
         file_ext = os.path.splitext(uploaded_file.name)[1].lower()
-        
+
         # 비율 계산 함수
         def get_ratio_str(w, h):
             r = w / h
-            if abs(r - 0.8) < 0.05: return "4:5"
-            if abs(r - 0.5625) < 0.05: return "9:16"
-            if abs(r - 1.0) < 0.05: return "1:1"
-            if abs(r - 1.77) < 0.1: return "16:9"
+            if abs(r - 0.8) < 0.05:
+                return "4:5"
+            if abs(r - 0.5625) < 0.05:
+                return "9:16"
+            if abs(r - 1.0) < 0.05:
+                return "1:1"
+            if abs(r - 1.77) < 0.1:
+                return "16:9"
             return f"{w/h:.2f}:1"
 
-        # --- 이미지 및 캐러셀 이미지 검수 ---
+        # 이미지 및 캐러셀 이미지
         if option == "이미지" or (
             option == "캐러셀"
-            and file_ext in ['.jpg', '.jpeg', '.png', '.webp']
+            and file_ext in [".jpg", ".jpeg", ".png", ".webp"]
         ):
             try:
                 with Image.open(uploaded_file) as img:
@@ -79,12 +82,10 @@ if uploaded_files:
 
                 r_str = get_ratio_str(w, h)
 
-                if abs((w/h) - 0.8) < 0.05:
+                if abs((w / h) - 0.8) < 0.05:
                     results.append(
-                        f"✅ {uploaded_file.name}: 이상없음 "
-                        f"({w}x{h}, {r_str})"
+                        f"✅ {uploaded_file.name}: 이상없음 ({w}x{h}, {r_str})"
                     )
-
                 else:
                     results.append(
                         f"❌ {uploaded_file.name}: 이미지 사이즈가 틀립니다. "
@@ -94,40 +95,32 @@ if uploaded_files:
 
             except Exception:
                 results.append(
-                    f"❌ {uploaded_file.name}: "
-                    f"파일을 읽는 중 오류가 발생했습니다."
+                    f"❌ {uploaded_file.name}: 파일을 읽는 중 오류가 발생했습니다."
                 )
 
-        # --- 영상 및 캐러셀 영상 검수 ---
+        # 영상 및 캐러셀 영상
         elif option == "영상" or (
             option == "캐러셀"
-            and file_ext in ['.mp4', '.mov', '.avi']
+            and file_ext in [".mp4", ".mov", ".avi"]
         ):
-
-            w, h = get_video_dimensions(
-                uploaded_file,
-                file_ext
-            )
+            w, h = get_video_dimensions(uploaded_file, file_ext)
 
             if w == 0 or h == 0:
                 results.append(
-                    f"❌ {uploaded_file.name}: "
-                    f"영상 데이터를 읽을 수 없습니다."
+                    f"❌ {uploaded_file.name}: 영상 데이터를 읽을 수 없습니다."
                 )
                 continue
-            
+
             r_str = get_ratio_str(w, h)
             ratio = w / h
-            
-            # 영상 → 9:16 기준
+
+            # 일반 영상 = 9:16
             if option == "영상":
 
                 if abs(ratio - 0.5625) < 0.05:
                     results.append(
-                        f"✅ {uploaded_file.name}: 이상없음 "
-                        f"({w}x{h}, {r_str})"
+                        f"✅ {uploaded_file.name}: 이상없음 ({w}x{h}, {r_str})"
                     )
-
                 else:
                     results.append(
                         f"⚠️ {uploaded_file.name}: 현재 사이즈가 "
@@ -135,14 +128,13 @@ if uploaded_files:
                         f"9:16 사이즈가 아니므로, 그대로 진행 시 "
                         f"위아래가 잘려 업로드됩니다."
                     )
-            
-            # 캐러셀 영상 → 4:5 기준
+
+            # 캐러셀 영상 = 4:5
             elif option == "캐러셀":
 
                 if abs(ratio - 0.8) < 0.05:
                     results.append(
-                        f"✅ {uploaded_file.name}: 이상없음 "
-                        f"({w}x{h}, {r_str})"
+                        f"✅ {uploaded_file.name}: 이상없음 ({w}x{h}, {r_str})"
                     )
 
                 elif abs(ratio - 1.77) < 0.1:
@@ -160,14 +152,15 @@ if uploaded_files:
                         f"(현재 {w}x{h}, {r_str})"
                     )
 
-# 파일별 한 줄 + 복사 시 줄바꿈 유지
-result_text = "\n\n".join(results)
+    # 검수 결과 전체 출력
+    # 반드시 if uploaded_files: 안쪽에 있어야 함
+    result_text = "\n".join(results)
 
-st.code(
-    result_text,
-    language=None,
-    wrap_lines=True
-)
+    st.code(
+        result_text,
+        language=None,
+        wrap_lines=True
+    )
 
 # --- 안내사항 영역 ---
 st.divider()
