@@ -430,6 +430,9 @@ def run_ffmpeg(
     command = [
         "ffmpeg",
         "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
 
         "-i",
         input_path,
@@ -437,22 +440,27 @@ def run_ffmpeg(
         "-vf",
         video_filter,
 
+        # H.264 고화질 인코딩
         "-c:v",
         "libx264",
 
+        # 육안상 원본과 차이를 최소화
         "-crf",
         "16",
 
+        # Cloud CPU 부담 완화
         "-preset",
-        "medium",
+        "fast",
 
+        # CPU 폭주 방지
+        "-threads",
+        "2",
+
+        # SNS / 브라우저 호환성
         "-pix_fmt",
         "yuv420p",
 
-        # 원본 FPS 유지
-        # 별도 -r 옵션을 넣지 않음
-
-        # 오디오 원본 스트림 유지
+        # 오디오는 재인코딩하지 않고 원본 그대로 복사
         "-c:a",
         "copy",
 
@@ -462,18 +470,29 @@ def run_ffmpeg(
         output_path
     ]
 
-    process = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
+    try:
+        process = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=300
+        )
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            "영상 변환 시간이 5분을 초과했습니다. "
+            "영상 길이 또는 해상도가 너무 클 수 있습니다."
+        )
 
     if process.returncode != 0:
-
-        raise RuntimeError(
-            process.stderr[-3000:]
+        error_message = (
+            process.stderr[-2000:]
+            if process.stderr
+            else "알 수 없는 FFmpeg 오류"
         )
+
+        raise RuntimeError(error_message)
 
 
 # =========================================================
@@ -689,136 +708,105 @@ def process_video(
     output_path = None
 
     try:
-
         original_ext = os.path.splitext(
             uploaded_file.name
         )[1].lower()
 
         uploaded_file.seek(0)
 
-        # 원본 임시파일
+        # read()로 원본 전체를 한 번 더 복제하지 않고
+        # 업로드 스트림을 바로 임시파일로 복사
         with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=original_ext
         ) as temp_input:
-
-            temp_input.write(
-                uploaded_file.read()
+            shutil.copyfileobj(
+                uploaded_file,
+                temp_input,
+                length=1024 * 1024
             )
+            input_path = temp_input.name
 
-            input_path = (
-                temp_input.name
+        vf = cv2.VideoCapture(input_path)
+
+        if not vf.isOpened():
+            raise RuntimeError(
+                "영상을 열 수 없습니다."
             )
-
-        # 영상 정보
-        vf = cv2.VideoCapture(
-            input_path
-        )
 
         w = int(
-            vf.get(
-                cv2.CAP_PROP_FRAME_WIDTH
-            )
+            vf.get(cv2.CAP_PROP_FRAME_WIDTH)
         )
-
         h = int(
-            vf.get(
-                cv2.CAP_PROP_FRAME_HEIGHT
-            )
+            vf.get(cv2.CAP_PROP_FRAME_HEIGHT)
         )
-
         fps = vf.get(
             cv2.CAP_PROP_FPS
         )
 
         vf.release()
 
-        if w == 0 or h == 0:
-
-            raise ValueError(
-                "영상 사이즈를 확인할 수 없습니다."
+        if w <= 0 or h <= 0:
+            raise RuntimeError(
+                "영상 해상도를 확인할 수 없습니다."
             )
 
-        # 필터 생성
         if mode == "crop":
-
-            video_filter = (
-                get_video_crop_filter(
-                    w,
-                    h,
-                    target_format,
-                    crop_position
-                )
+            video_filter = get_video_crop_filter(
+                w,
+                h,
+                target_format,
+                crop_position
             )
 
         elif mode == "padding":
-
-            video_filter = (
-                get_video_padding_filter(
-                    w,
-                    h,
-                    target_format
-                )
+            video_filter = get_video_padding_filter(
+                w,
+                h,
+                target_format
             )
 
         else:
-
-            raise ValueError(
-                "잘못된 영상 처리 방식입니다."
+            raise RuntimeError(
+                "지원하지 않는 영상 처리 방식입니다."
             )
 
-        # 출력 임시파일
-        with tempfile.NamedTemporaryFile(
-            delete=False,
+        fd, output_path = tempfile.mkstemp(
             suffix=".mp4"
-        ) as temp_output:
+        )
+        os.close(fd)
+        os.remove(output_path)
 
-            output_path = (
-                temp_output.name
-            )
-
-        if os.path.exists(
-            output_path
-        ):
-            os.remove(
-                output_path
-            )
-
-        # FFmpeg 실행
         run_ffmpeg(
             input_path,
             output_path,
             video_filter
         )
 
-        # 결과 읽기
-        with open(
-            output_path,
-            "rb"
-        ) as result_file:
-
-            result_data = (
-                result_file.read()
+        if (
+            not os.path.exists(output_path)
+            or os.path.getsize(output_path) <= 0
+        ):
+            raise RuntimeError(
+                "변환된 영상 파일이 정상적으로 생성되지 않았습니다."
             )
 
-        # 결과 사이즈 확인
         result_vf = cv2.VideoCapture(
             output_path
         )
 
         result_w = int(
-            result_vf.get(
-                cv2.CAP_PROP_FRAME_WIDTH
-            )
+            result_vf.get(cv2.CAP_PROP_FRAME_WIDTH)
         )
-
         result_h = int(
-            result_vf.get(
-                cv2.CAP_PROP_FRAME_HEIGHT
-            )
+            result_vf.get(cv2.CAP_PROP_FRAME_HEIGHT)
         )
 
         result_vf.release()
+
+        # 다운로드에 필요한 최종 결과만 마지막에 1회 메모리에 로드
+        with open(output_path, "rb") as result_file:
+            result_data = result_file.read()
 
         return (
             result_data,
@@ -830,26 +818,23 @@ def process_video(
         )
 
     finally:
-
         if (
             input_path
-            and os.path.exists(
-                input_path
-            )
+            and os.path.exists(input_path)
         ):
-            os.remove(
-                input_path
-            )
+            try:
+                os.remove(input_path)
+            except OSError:
+                pass
 
         if (
             output_path
-            and os.path.exists(
-                output_path
-            )
+            and os.path.exists(output_path)
         ):
-            os.remove(
-                output_path
-            )
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
 
 # =========================================================
@@ -1610,128 +1595,85 @@ if padding_files:
 
 st.divider()
 
-st.header(
-    "🎬 영상 크롭"
-)
+st.header("🎬 영상 크롭")
 
 st.caption(
     "원본 영상을 확대/축소하지 않고 "
-    "선택한 비율의 영역만 크롭합니다."
+    "선택한 비율의 영역만 크롭합니다. "
+    "영상은 한 번에 1개씩 처리합니다."
 )
-
 
 video_crop_target = st.radio(
     "변환할 영상 비율",
-    [
-        "4:5",
-        "9:16"
-    ],
+    ["4:5", "9:16"],
     horizontal=True,
     key="video_crop_target"
 )
 
-
 if not ffmpeg_available():
-
     st.error(
         "FFmpeg가 설치되어 있지 않습니다. "
         "packages.txt에 ffmpeg를 추가해주세요."
     )
 
-
-video_crop_files = st.file_uploader(
+video_crop_file = st.file_uploader(
     "크롭할 영상을 선택하세요",
-    type=[
-        "mp4",
-        "mov",
-        "avi"
-    ],
-    accept_multiple_files=True,
+    type=["mp4", "mov", "avi"],
+    accept_multiple_files=False,
     key="video_crop_uploader"
 )
 
-
 video_crop_position = "중앙"
 
+if video_crop_file:
 
-if video_crop_files:
-
-    # 첫 번째 영상 기준으로
-    # 필요한 크롭 방향 UI 표시
-    first_file = (
-        video_crop_files[0]
-    )
-
-    first_ext = os.path.splitext(
-        first_file.name
+    file_ext = os.path.splitext(
+        video_crop_file.name
     )[1].lower()
 
     (
-        first_w,
-        first_h,
-        first_fps,
-        first_duration
+        video_w,
+        video_h,
+        video_fps,
+        video_duration
     ) = get_video_dimensions(
-        first_file,
-        first_ext
+        video_crop_file,
+        file_ext
     )
 
-    if (
-        first_w > 0
-        and first_h > 0
-    ):
+    if video_w > 0 and video_h > 0:
 
-        first_ratio = (
-            first_w / first_h
+        current_ratio = video_w / video_h
+        target_ratio = get_target_ratio(
+            video_crop_target
         )
 
-        target_ratio = (
-            get_target_ratio(
-                video_crop_target
-            )
+        st.caption(
+            f"원본: {video_w} × {video_h} "
+            f"/ {get_ratio_str(video_w, video_h)}"
         )
 
-        # 원본이 목표보다 가로로 넓음
-        # → 좌우 크롭
-        if first_ratio > target_ratio:
-
-            video_crop_position = (
-                st.radio(
-                    "크롭 기준",
-                    [
-                        "좌측",
-                        "중앙",
-                        "우측"
-                    ],
-                    horizontal=True,
-                    key="video_crop_horizontal"
-                )
+        if current_ratio > target_ratio:
+            video_crop_position = st.radio(
+                "크롭 기준",
+                ["좌측", "중앙", "우측"],
+                horizontal=True,
+                key="video_crop_horizontal"
             )
 
-        # 원본이 목표보다 세로로 김
-        # → 상하 크롭
-        elif first_ratio < target_ratio:
-
-            video_crop_position = (
-                st.radio(
-                    "크롭 기준",
-                    [
-                        "상단",
-                        "중앙",
-                        "하단"
-                    ],
-                    horizontal=True,
-                    key="video_crop_vertical"
-                )
+        elif current_ratio < target_ratio:
+            video_crop_position = st.radio(
+                "크롭 기준",
+                ["상단", "중앙", "하단"],
+                horizontal=True,
+                key="video_crop_vertical"
             )
 
         else:
-
             st.info(
                 f"업로드한 영상이 이미 "
                 f"{video_crop_target} 비율입니다."
             )
-
 
     if st.button(
         f"🎬 {video_crop_target} 영상 크롭 시작",
@@ -1740,147 +1682,100 @@ if video_crop_files:
     ):
 
         if not ffmpeg_available():
-
             st.error(
                 "FFmpeg가 설치되어 있지 않습니다."
             )
 
-        else:
-
-            video_crop_zip = (
-                BytesIO()
+        elif video_w <= 0 or video_h <= 0:
+            st.error(
+                "영상 정보를 읽을 수 없습니다."
             )
 
-            video_crop_success = 0
-
-            with zipfile.ZipFile(
-                video_crop_zip,
-                "w",
-                zipfile.ZIP_DEFLATED
-            ) as video_zip:
-
-                for index, video_file in enumerate(
-                    video_crop_files
+        else:
+            try:
+                with st.spinner(
+                    f"{video_crop_file.name} "
+                    f"{video_crop_target} 크롭 중..."
                 ):
-
-                    try:
-
-                        with st.spinner(
-                            f"{video_file.name} "
-                            f"{video_crop_target} 크롭 중..."
-                        ):
-
-                            (
-                                result_data,
-                                original_w,
-                                original_h,
-                                result_w,
-                                result_h,
-                                fps
-                            ) = process_video(
-                                video_file,
-                                "crop",
-                                video_crop_target,
-                                video_crop_position
-                            )
-
-                        st.success(
-                            f"✅ {video_file.name}"
-                        )
-
-                        st.caption(
-                            f"원본: "
-                            f"{original_w} × {original_h}"
-                            f" → "
-                            f"결과: "
-                            f"{result_w} × {result_h}"
-                            f" / "
-                            f"{get_ratio_str(result_w, result_h)}"
-                        )
-
-                        original_name = (
-                            os.path.splitext(
-                                video_file.name
-                            )[0]
-                        )
-
-                        ratio_filename = (
-                            video_crop_target
-                            .replace(
-                                ":",
-                                "x"
-                            )
-                        )
-
-                        download_name = (
-                            f"{original_name}"
-                            f"_{ratio_filename}_crop.mp4"
-                        )
-
-                        st.download_button(
-                            label=(
-                                f"⬇️ "
-                                f"{video_file.name} "
-                                f"다운로드"
-                            ),
-                            data=result_data,
-                            file_name=download_name,
-                            mime="video/mp4",
-                            key=(
-                                f"video_crop_download_"
-                                f"{index}"
-                            )
-                        )
-
-                        video_zip.writestr(
-                            download_name,
-                            result_data
-                        )
-
-                        video_crop_success += 1
-
-                        st.divider()
-
-                    except Exception as e:
-
-                        st.error(
-                            f"❌ "
-                            f"{video_file.name}: "
-                            f"영상 크롭 실패"
-                        )
-
-                        st.caption(
-                            str(e)
-                        )
-
-            if video_crop_success > 0:
-
-                video_crop_zip.seek(0)
+                    (
+                        result_data,
+                        original_w,
+                        original_h,
+                        result_w,
+                        result_h,
+                        fps
+                    ) = process_video(
+                        video_crop_file,
+                        "crop",
+                        video_crop_target,
+                        video_crop_position
+                    )
 
                 ratio_filename = (
-                    video_crop_target
-                    .replace(
-                        ":",
-                        "x"
-                    )
+                    video_crop_target.replace(":", "x")
                 )
 
-                st.download_button(
-                    label=(
-                        f"⬇️ 전체 "
-                        f"{video_crop_target} "
-                        f"크롭 영상 다운로드 "
-                        f"({video_crop_success}개)"
+                original_name = os.path.splitext(
+                    video_crop_file.name
+                )[0]
+
+                st.session_state["video_crop_result"] = {
+                    "data": result_data,
+                    "file_name": (
+                        f"{original_name}_"
+                        f"{ratio_filename}_crop.mp4"
                     ),
-                    data=video_crop_zip.getvalue(),
-                    file_name=(
-                        f"{ratio_filename}"
-                        f"_cropped_videos.zip"
-                    ),
-                    mime="application/zip",
-                    use_container_width=True,
-                    key="download_all_video_crop"
+                    "source_name": video_crop_file.name,
+                    "original_w": original_w,
+                    "original_h": original_h,
+                    "result_w": result_w,
+                    "result_h": result_h,
+                    "target": video_crop_target
+                }
+
+            except Exception as e:
+                st.session_state.pop(
+                    "video_crop_result",
+                    None
                 )
+                st.error(
+                    f"❌ {video_crop_file.name}: "
+                    f"영상 크롭 실패"
+                )
+                st.caption(str(e))
+
+    crop_result = st.session_state.get(
+        "video_crop_result"
+    )
+
+    if (
+        crop_result
+        and crop_result["source_name"]
+        == video_crop_file.name
+        and crop_result["target"]
+        == video_crop_target
+    ):
+        st.success("✅ 영상 크롭 완료")
+
+        st.caption(
+            f"원본: "
+            f"{crop_result['original_w']} × "
+            f"{crop_result['original_h']}"
+            f" → 결과: "
+            f"{crop_result['result_w']} × "
+            f"{crop_result['result_h']}"
+            f" / "
+            f"{get_ratio_str(crop_result['result_w'], crop_result['result_h'])}"
+        )
+
+        st.download_button(
+            label="⬇️ 크롭 영상 다운로드",
+            data=crop_result["data"],
+            file_name=crop_result["file_name"],
+            mime="video/mp4",
+            use_container_width=True,
+            key="video_crop_download"
+        )
 
 
 # =========================================================
@@ -1889,52 +1784,82 @@ if video_crop_files:
 
 st.divider()
 
-st.header(
-    "🎬 영상 여백 추가"
-)
+st.header("🎬 영상 여백 추가")
 
 st.caption(
     "원본 영상을 확대/축소하지 않고 "
-    "검은색 여백을 추가하여 "
-    "선택한 비율로 만듭니다."
+    "검은색 여백을 추가하여 선택한 비율로 만듭니다. "
+    "영상은 한 번에 1개씩 처리합니다."
 )
-
 
 video_padding_target = st.radio(
     "변환할 영상 비율",
-    [
-        "4:5",
-        "9:16"
-    ],
+    ["4:5", "9:16"],
     horizontal=True,
     key="video_padding_target"
 )
 
-
-video_padding_files = (
-    st.file_uploader(
-        "여백을 추가할 영상을 선택하세요",
-        type=[
-            "mp4",
-            "mov",
-            "avi"
-        ],
-        accept_multiple_files=True,
-        key="video_padding_uploader"
-    )
+video_padding_file = st.file_uploader(
+    "여백을 추가할 영상을 선택하세요",
+    type=["mp4", "mov", "avi"],
+    accept_multiple_files=False,
+    key="video_padding_uploader"
 )
 
+if video_padding_file:
 
-if video_padding_files:
+    padding_ext = os.path.splitext(
+        video_padding_file.name
+    )[1].lower()
 
-    st.info(
-        f"선택한 목표 비율은 "
-        f"**{video_padding_target}**입니다.\n\n"
-        "영상 비율을 자동으로 계산하여 "
-        "필요한 방향에 검은색 여백을 추가합니다.\n\n"
-        "• 원본이 목표보다 가로로 넓음 → 상하 여백\n\n"
-        "• 원본이 목표보다 세로로 김 → 좌우 여백"
+    (
+        padding_w,
+        padding_h,
+        padding_fps,
+        padding_duration
+    ) = get_video_dimensions(
+        video_padding_file,
+        padding_ext
     )
+
+    if padding_w > 0 and padding_h > 0:
+
+        padding_current_ratio = (
+            padding_w / padding_h
+        )
+
+        padding_target_ratio = (
+            get_target_ratio(
+                video_padding_target
+            )
+        )
+
+        if (
+            padding_current_ratio
+            > padding_target_ratio
+        ):
+            padding_direction_text = (
+                "상하 검은 여백"
+            )
+
+        elif (
+            padding_current_ratio
+            < padding_target_ratio
+        ):
+            padding_direction_text = (
+                "좌우 검은 여백"
+            )
+
+        else:
+            padding_direction_text = (
+                "여백 추가 불필요"
+            )
+
+        st.info(
+            f"목표 비율: **{video_padding_target}**  \n"
+            f"원본: **{padding_w} × {padding_h}**  \n"
+            f"적용 방식: **{padding_direction_text}**"
+        )
 
     if st.button(
         f"🎬 {video_padding_target} 영상 여백 추가 시작",
@@ -1943,147 +1868,101 @@ if video_padding_files:
     ):
 
         if not ffmpeg_available():
-
             st.error(
                 "FFmpeg가 설치되어 있지 않습니다."
             )
 
-        else:
-
-            video_padding_zip = (
-                BytesIO()
+        elif padding_w <= 0 or padding_h <= 0:
+            st.error(
+                "영상 정보를 읽을 수 없습니다."
             )
 
-            video_padding_success = 0
-
-            with zipfile.ZipFile(
-                video_padding_zip,
-                "w",
-                zipfile.ZIP_DEFLATED
-            ) as padding_video_zip:
-
-                for index, video_file in enumerate(
-                    video_padding_files
+        else:
+            try:
+                with st.spinner(
+                    f"{video_padding_file.name} "
+                    f"{video_padding_target} "
+                    f"여백 추가 중..."
                 ):
-
-                    try:
-
-                        with st.spinner(
-                            f"{video_file.name} "
-                            f"{video_padding_target} "
-                            f"여백 추가 중..."
-                        ):
-
-                            (
-                                result_data,
-                                original_w,
-                                original_h,
-                                result_w,
-                                result_h,
-                                fps
-                            ) = process_video(
-                                video_file,
-                                "padding",
-                                video_padding_target
-                            )
-
-                        st.success(
-                            f"✅ {video_file.name}"
-                        )
-
-                        st.caption(
-                            f"원본: "
-                            f"{original_w} × {original_h}"
-                            f" → "
-                            f"결과: "
-                            f"{result_w} × {result_h}"
-                            f" / "
-                            f"{get_ratio_str(result_w, result_h)}"
-                        )
-
-                        original_name = (
-                            os.path.splitext(
-                                video_file.name
-                            )[0]
-                        )
-
-                        ratio_filename = (
-                            video_padding_target
-                            .replace(
-                                ":",
-                                "x"
-                            )
-                        )
-
-                        download_name = (
-                            f"{original_name}"
-                            f"_{ratio_filename}"
-                            f"_black_padding.mp4"
-                        )
-
-                        st.download_button(
-                            label=(
-                                f"⬇️ "
-                                f"{video_file.name} "
-                                f"다운로드"
-                            ),
-                            data=result_data,
-                            file_name=download_name,
-                            mime="video/mp4",
-                            key=(
-                                f"video_padding_download_"
-                                f"{index}"
-                            )
-                        )
-
-                        padding_video_zip.writestr(
-                            download_name,
-                            result_data
-                        )
-
-                        video_padding_success += 1
-
-                        st.divider()
-
-                    except Exception as e:
-
-                        st.error(
-                            f"❌ "
-                            f"{video_file.name}: "
-                            f"영상 여백 추가 실패"
-                        )
-
-                        st.caption(
-                            str(e)
-                        )
-
-            if video_padding_success > 0:
-
-                video_padding_zip.seek(0)
+                    (
+                        result_data,
+                        original_w,
+                        original_h,
+                        result_w,
+                        result_h,
+                        fps
+                    ) = process_video(
+                        video_padding_file,
+                        "padding",
+                        video_padding_target
+                    )
 
                 ratio_filename = (
-                    video_padding_target
-                    .replace(
-                        ":",
-                        "x"
-                    )
+                    video_padding_target.replace(":", "x")
                 )
 
-                st.download_button(
-                    label=(
-                        f"⬇️ 전체 "
-                        f"{video_padding_target} "
-                        f"여백 영상 다운로드 "
-                        f"({video_padding_success}개)"
+                original_name = os.path.splitext(
+                    video_padding_file.name
+                )[0]
+
+                st.session_state[
+                    "video_padding_result"
+                ] = {
+                    "data": result_data,
+                    "file_name": (
+                        f"{original_name}_"
+                        f"{ratio_filename}_"
+                        f"black_padding.mp4"
                     ),
-                    data=(
-                        video_padding_zip.getvalue()
-                    ),
-                    file_name=(
-                        f"{ratio_filename}"
-                        f"_black_padding_videos.zip"
-                    ),
-                    mime="application/zip",
-                    use_container_width=True,
-                    key="download_all_video_padding"
+                    "source_name": video_padding_file.name,
+                    "original_w": original_w,
+                    "original_h": original_h,
+                    "result_w": result_w,
+                    "result_h": result_h,
+                    "target": video_padding_target
+                }
+
+            except Exception as e:
+                st.session_state.pop(
+                    "video_padding_result",
+                    None
                 )
+                st.error(
+                    f"❌ {video_padding_file.name}: "
+                    f"영상 여백 추가 실패"
+                )
+                st.caption(str(e))
+
+    padding_result = st.session_state.get(
+        "video_padding_result"
+    )
+
+    if (
+        padding_result
+        and padding_result["source_name"]
+        == video_padding_file.name
+        and padding_result["target"]
+        == video_padding_target
+    ):
+        st.success("✅ 영상 여백 추가 완료")
+
+        st.caption(
+            f"원본: "
+            f"{padding_result['original_w']} × "
+            f"{padding_result['original_h']}"
+            f" → 결과: "
+            f"{padding_result['result_w']} × "
+            f"{padding_result['result_h']}"
+            f" / "
+            f"{get_ratio_str(padding_result['result_w'], padding_result['result_h'])}"
+        )
+
+        st.download_button(
+            label="⬇️ 여백 영상 다운로드",
+            data=padding_result["data"],
+            file_name=padding_result["file_name"],
+            mime="video/mp4",
+            use_container_width=True,
+            key="video_padding_download"
+        )
+
