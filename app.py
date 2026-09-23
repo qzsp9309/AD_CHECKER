@@ -42,19 +42,20 @@ def get_ratio_str(w, h):
 
     r = w / h
 
-    if abs(r - 0.8) < 0.05:
-        return "4:5"
-
+    # 3:4를 먼저 체크해서 0.75 비율이 4:5로 잡히지 않게 함
     if abs(r - 0.75) < 0.03:
         return "3:4"
 
-    if abs(r - 0.5625) < 0.05:
+    if abs(r - 0.8) < 0.03:
+        return "4:5"
+
+    if abs(r - 0.5625) < 0.03:
         return "9:16"
 
-    if abs(r - 1.0) < 0.05:
+    if abs(r - 1.0) < 0.03:
         return "1:1"
 
-    if abs(r - 1.77) < 0.1:
+    if abs(r - (16 / 9)) < 0.05:
         return "16:9"
 
     return f"{r:.2f}:1"
@@ -103,38 +104,93 @@ def get_video_dimensions(file, file_ext):
             os.remove(temp_path)
 
 
+def save_image_to_buffer(img, file_ext):
+    """
+    이미지 다운로드용 버퍼 생성
+
+    PNG  : 무손실
+    WEBP : lossless
+    JPG  : 최고품질 재인코딩
+    """
+
+    buffer = BytesIO()
+
+    if file_ext == ".png":
+
+        img.save(
+            buffer,
+            format="PNG",
+            optimize=False
+        )
+
+        download_ext = ".png"
+        mime_type = "image/png"
+
+    elif file_ext == ".webp":
+
+        img.save(
+            buffer,
+            format="WEBP",
+            lossless=True,
+            quality=100,
+            method=6
+        )
+
+        download_ext = ".webp"
+        mime_type = "image/webp"
+
+    else:
+
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        img.save(
+            buffer,
+            format="JPEG",
+            quality=100,
+            subsampling=0,
+            optimize=False
+        )
+
+        download_ext = ".jpg"
+        mime_type = "image/jpeg"
+
+    buffer.seek(0)
+
+    return (
+        buffer.getvalue(),
+        download_ext,
+        mime_type
+    )
+
+
+# =========================================================
+# 4:5 이미지 크롭 함수
+# =========================================================
+
 def crop_image_to_4_5(
     img,
     crop_position="중앙"
 ):
-    """
-    리사이즈하지 않고 원본 픽셀 기준으로
-    4:5 비율 크롭
-    """
 
     target_ratio = 4 / 5
 
     w, h = img.size
     current_ratio = w / h
 
-    # 이미 4:5
+    # 이미 정확한 4:5
     if abs(current_ratio - target_ratio) < 0.001:
         return img.copy()
 
     # -----------------------------------------------------
     # 가로가 넓은 이미지
-    # → 좌우 크롭
+    # → 좌우 중앙 크롭
     # -----------------------------------------------------
 
     if current_ratio > target_ratio:
 
         new_width = round(
             h * target_ratio
-        )
-
-        # 4의 배수로 맞춤
-        new_width = new_width - (
-            new_width % 4
         )
 
         left = (
@@ -159,21 +215,13 @@ def crop_image_to_4_5(
             w / target_ratio
         )
 
-        # 5의 배수로 맞춤
-        new_height = new_height - (
-            new_height % 5
-        )
-
         if crop_position == "상단":
-
             top = 0
 
         elif crop_position == "하단":
-
             top = h - new_height
 
         else:
-
             top = (
                 h - new_height
             ) // 2
@@ -189,10 +237,169 @@ def crop_image_to_4_5(
 
 
 # =========================================================
+# 4:5 검은색 여백 추가 함수
+# =========================================================
+
+def add_black_padding_to_4_5(
+    img,
+    padding_direction
+):
+    """
+    원본 이미지는 리사이즈하지 않고
+    RGB(0, 0, 0) 검은색 캔버스를 확장하여
+    최종 이미지를 4:5로 만듦.
+
+    상하 여백:
+    원본 가로 폭 유지 + 캔버스 높이 확장
+
+    좌우 여백:
+    원본 세로 높이 유지 + 캔버스 가로 폭 확장
+    """
+
+    target_ratio = 4 / 5
+
+    w, h = img.size
+    current_ratio = w / h
+
+    # 이미 4:5인 경우
+    if abs(current_ratio - target_ratio) < 0.001:
+        return img.copy()
+
+    # -----------------------------------------------------
+    # 상하 여백
+    # -----------------------------------------------------
+
+    if padding_direction == "상하 여백":
+
+        # 상하 여백은 현재 이미지가 4:5보다 가로로 넓어야 가능
+        if current_ratio < target_ratio:
+            raise ValueError(
+                "이 이미지는 상하 여백만 추가해서 "
+                "4:5 비율로 만들 수 없습니다. "
+                "'좌우 여백'을 선택해주세요."
+            )
+
+        new_height = round(
+            w / target_ratio
+        )
+
+        if new_height < h:
+            raise ValueError(
+                "상하 여백만 추가해서 "
+                "4:5 비율로 만들 수 없습니다."
+            )
+
+        # RGB 검은색 캔버스 생성
+        canvas = Image.new(
+            "RGB",
+            (w, new_height),
+            (0, 0, 0)
+        )
+
+        # 원본이 RGBA인 경우 알파채널을 마스크로 사용
+        if img.mode == "RGBA":
+
+            top = (
+                new_height - h
+            ) // 2
+
+            canvas.paste(
+                img,
+                (0, top),
+                img
+            )
+
+        else:
+
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            top = (
+                new_height - h
+            ) // 2
+
+            canvas.paste(
+                img,
+                (0, top)
+            )
+
+        return canvas
+
+
+    # -----------------------------------------------------
+    # 좌우 여백
+    # -----------------------------------------------------
+
+    elif padding_direction == "좌우 여백":
+
+        # 좌우 여백은 현재 이미지가 4:5보다 세로로 길어야 가능
+        if current_ratio > target_ratio:
+            raise ValueError(
+                "이 이미지는 좌우 여백만 추가해서 "
+                "4:5 비율로 만들 수 없습니다. "
+                "'상하 여백'을 선택해주세요."
+            )
+
+        new_width = round(
+            h * target_ratio
+        )
+
+        if new_width < w:
+            raise ValueError(
+                "좌우 여백만 추가해서 "
+                "4:5 비율로 만들 수 없습니다."
+            )
+
+        # RGB 검은색 캔버스 생성
+        canvas = Image.new(
+            "RGB",
+            (new_width, h),
+            (0, 0, 0)
+        )
+
+        # 원본이 RGBA인 경우 알파채널을 마스크로 사용
+        if img.mode == "RGBA":
+
+            left = (
+                new_width - w
+            ) // 2
+
+            canvas.paste(
+                img,
+                (left, 0),
+                img
+            )
+
+        else:
+
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            left = (
+                new_width - w
+            ) // 2
+
+            canvas.paste(
+                img,
+                (left, 0)
+            )
+
+        return canvas
+
+    else:
+
+        raise ValueError(
+            "올바른 여백 방향을 선택해주세요."
+        )
+
+
+# =========================================================
 # 메인 화면
 # =========================================================
 
-st.title("📏 광고 소재 사이즈 검수 툴")
+st.title(
+    "📏 광고 소재 사이즈 검수 툴"
+)
 
 st.caption(
     "업로드하신 소재의 비율을 자동으로 체크합니다."
@@ -395,7 +602,7 @@ if uploaded_files:
 
 
                 elif abs(
-                    ratio - 1.77
+                    ratio - (16 / 9)
                 ) < 0.1:
 
                     results.append(
@@ -419,10 +626,6 @@ if uploaded_files:
                     )
 
 
-        # -------------------------------------------------
-        # 지원하지 않는 형식
-        # -------------------------------------------------
-
         else:
 
             results.append(
@@ -441,17 +644,12 @@ if results:
         results
     )
 
-    # 화면 표시
     st.code(
         result_text,
         language=None,
         wrap_lines=True
     )
 
-
-    # -----------------------------------------------------
-    # 복사 버튼
-    # -----------------------------------------------------
 
     result_text_json = json.dumps(
         result_text,
@@ -584,7 +782,7 @@ st.warning(
 
 
 # =========================================================
-# 2. 4:5 이미지 자동 크롭
+# 2. 4:5 이미지 크롭
 # =========================================================
 
 st.divider()
@@ -624,10 +822,6 @@ crop_position = st.radio(
 )
 
 
-# =========================================================
-# 크롭 처리
-# =========================================================
-
 if crop_files:
 
     st.subheader(
@@ -656,11 +850,6 @@ if crop_files:
                     crop_file.name
                 )[1].lower()
 
-
-                # -----------------------------------------
-                # 이미지 열기
-                # -----------------------------------------
-
                 crop_file.seek(0)
 
                 img = Image.open(
@@ -676,10 +865,6 @@ if crop_files:
                 )
 
 
-                # -----------------------------------------
-                # 4:5 크롭
-                # -----------------------------------------
-
                 cropped_img = (
                     crop_image_to_4_5(
                         img,
@@ -691,10 +876,6 @@ if crop_files:
                     cropped_img.size
                 )
 
-
-                # -----------------------------------------
-                # 정보 표시
-                # -----------------------------------------
 
                 st.write(
                     f"**{crop_file.name}**"
@@ -709,10 +890,6 @@ if crop_files:
                 )
 
 
-                # -----------------------------------------
-                # 미리보기
-                # -----------------------------------------
-
                 st.image(
                     cropped_img,
                     caption=(
@@ -723,78 +900,20 @@ if crop_files:
                 )
 
 
-                # -----------------------------------------
-                # 다운로드 파일 생성
-                # -----------------------------------------
+                (
+                    file_data,
+                    download_ext,
+                    mime_type
+                ) = save_image_to_buffer(
+                    cropped_img,
+                    file_ext
+                )
 
-                buffer = BytesIO()
 
                 original_name = (
                     os.path.splitext(
                         crop_file.name
                     )[0]
-                )
-
-
-                # PNG
-                if file_ext == ".png":
-
-                    cropped_img.save(
-                        buffer,
-                        format="PNG",
-                        optimize=False
-                    )
-
-                    download_ext = ".png"
-                    mime_type = "image/png"
-
-
-                # WEBP
-                elif file_ext == ".webp":
-
-                    cropped_img.save(
-                        buffer,
-                        format="WEBP",
-                        lossless=True,
-                        quality=100,
-                        method=6
-                    )
-
-                    download_ext = ".webp"
-                    mime_type = "image/webp"
-
-
-                # JPG / JPEG
-                else:
-
-                    if cropped_img.mode not in (
-                        "RGB",
-                        "L"
-                    ):
-
-                        cropped_img = (
-                            cropped_img.convert(
-                                "RGB"
-                            )
-                        )
-
-
-                    cropped_img.save(
-                        buffer,
-                        format="JPEG",
-                        quality=100,
-                        subsampling=0,
-                        optimize=False
-                    )
-
-                    download_ext = ".jpg"
-                    mime_type = "image/jpeg"
-
-
-                buffer.seek(0)
-
-                file_data = (
-                    buffer.getvalue()
                 )
 
 
@@ -804,10 +923,6 @@ if crop_files:
                     f"{download_ext}"
                 )
 
-
-                # -----------------------------------------
-                # 개별 다운로드
-                # -----------------------------------------
 
                 st.download_button(
                     label=(
@@ -819,16 +934,12 @@ if crop_files:
                     file_name=download_filename,
                     mime=mime_type,
                     key=(
-                        f"download_"
+                        f"crop_download_"
                         f"{index}_"
                         f"{crop_file.name}"
                     )
                 )
 
-
-                # -----------------------------------------
-                # ZIP 추가
-                # -----------------------------------------
 
                 zip_file.writestr(
                     download_filename,
@@ -844,18 +955,13 @@ if crop_files:
 
                 st.error(
                     f"❌ {crop_file.name}: "
-                    f"이미지 처리 중 오류가 "
-                    f"발생했습니다."
+                    f"이미지 처리 중 오류가 발생했습니다."
                 )
 
                 st.caption(
                     str(e)
                 )
 
-
-    # =====================================================
-    # 전체 ZIP 다운로드
-    # =====================================================
 
     if success_count > 0:
 
@@ -878,4 +984,247 @@ if crop_files:
             mime="application/zip",
             use_container_width=True,
             key="download_all_crop"
+        )
+
+
+# =========================================================
+# 3. 4:5 이미지 검은색 여백 추가
+# =========================================================
+
+st.divider()
+
+st.header(
+    "⬛ 4:5 이미지 여백 추가"
+)
+
+st.caption(
+    "원본 이미지를 확대하거나 축소하지 않고 "
+    "검은색 여백(RGB 0, 0, 0)을 추가하여 "
+    "4:5 비율로 만듭니다."
+)
+
+
+padding_files = st.file_uploader(
+    "여백을 추가할 이미지를 선택하세요",
+    type=[
+        "jpg",
+        "jpeg",
+        "png",
+        "webp"
+    ],
+    accept_multiple_files=True,
+    key="padding_uploader"
+)
+
+
+padding_direction = st.radio(
+    "여백 방향",
+    [
+        "상하 여백",
+        "좌우 여백"
+    ],
+    horizontal=True,
+    key="padding_direction"
+)
+
+
+# =========================================================
+# 여백 이미지 처리
+# =========================================================
+
+if padding_files:
+
+    st.subheader(
+        "🖼️ 여백 추가 결과"
+    )
+
+    padding_zip_buffer = BytesIO()
+
+    padding_success_count = 0
+
+
+    with zipfile.ZipFile(
+        padding_zip_buffer,
+        "w",
+        zipfile.ZIP_DEFLATED
+    ) as padding_zip_file:
+
+
+        for index, padding_file in enumerate(
+            padding_files
+        ):
+
+            try:
+
+                file_ext = os.path.splitext(
+                    padding_file.name
+                )[1].lower()
+
+
+                # -----------------------------------------
+                # 원본 이미지 열기
+                # -----------------------------------------
+
+                padding_file.seek(0)
+
+                img = Image.open(
+                    padding_file
+                )
+
+                img = ImageOps.exif_transpose(
+                    img
+                )
+
+                original_w, original_h = (
+                    img.size
+                )
+
+
+                # -----------------------------------------
+                # 4:5 검은색 여백 추가
+                # -----------------------------------------
+
+                padded_img = (
+                    add_black_padding_to_4_5(
+                        img,
+                        padding_direction
+                    )
+                )
+
+                new_w, new_h = (
+                    padded_img.size
+                )
+
+
+                # -----------------------------------------
+                # 정보 표시
+                # -----------------------------------------
+
+                st.write(
+                    f"**{padding_file.name}**"
+                )
+
+                st.caption(
+                    f"원본: "
+                    f"{original_w} × {original_h}"
+                    f"  →  "
+                    f"여백 추가: "
+                    f"{new_w} × {new_h} (4:5)"
+                )
+
+
+                # -----------------------------------------
+                # 미리보기
+                # -----------------------------------------
+
+                st.image(
+                    padded_img,
+                    caption=(
+                        f"{padding_direction} / "
+                        f"검은색 여백 / 4:5"
+                    ),
+                    use_container_width=True
+                )
+
+
+                # -----------------------------------------
+                # 다운로드 파일 생성
+                # -----------------------------------------
+
+                (
+                    file_data,
+                    download_ext,
+                    mime_type
+                ) = save_image_to_buffer(
+                    padded_img,
+                    file_ext
+                )
+
+
+                original_name = (
+                    os.path.splitext(
+                        padding_file.name
+                    )[0]
+                )
+
+
+                download_filename = (
+                    f"{original_name}"
+                    f"_4x5_black_padding"
+                    f"{download_ext}"
+                )
+
+
+                # -----------------------------------------
+                # 개별 다운로드
+                # -----------------------------------------
+
+                st.download_button(
+                    label=(
+                        f"⬇️ "
+                        f"{padding_file.name} "
+                        f"다운로드"
+                    ),
+                    data=file_data,
+                    file_name=download_filename,
+                    mime=mime_type,
+                    key=(
+                        f"padding_download_"
+                        f"{index}_"
+                        f"{padding_file.name}"
+                    )
+                )
+
+
+                # -----------------------------------------
+                # ZIP 추가
+                # -----------------------------------------
+
+                padding_zip_file.writestr(
+                    download_filename,
+                    file_data
+                )
+
+                padding_success_count += 1
+
+                st.divider()
+
+
+            except Exception as e:
+
+                st.error(
+                    f"❌ {padding_file.name}: "
+                    f"여백 추가 중 오류가 발생했습니다."
+                )
+
+                st.caption(
+                    str(e)
+                )
+
+
+    # =====================================================
+    # 여백 이미지 전체 ZIP 다운로드
+    # =====================================================
+
+    if padding_success_count > 0:
+
+        padding_zip_buffer.seek(0)
+
+        st.subheader(
+            "📦 전체 다운로드"
+        )
+
+        st.download_button(
+            label=(
+                f"⬇️ 전체 여백 이미지 "
+                f"다운로드 "
+                f"({padding_success_count}개)"
+            ),
+            data=padding_zip_buffer.getvalue(),
+            file_name=(
+                "4x5_black_padding_images.zip"
+            ),
+            mime="application/zip",
+            use_container_width=True,
+            key="download_all_padding"
         )
