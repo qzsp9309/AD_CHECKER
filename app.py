@@ -1,127 +1,95 @@
-                "상하 검은 여백"
-            )
+import streamlit as st
+from PIL import Image, ImageOps
+import cv2
+import tempfile
+import os
+import zipfile
+import json
+import subprocess
+import shutil
+from io import BytesIO
+import streamlit.components.v1 as components
 
-        elif (
-            padding_current_ratio
-            < padding_target_ratio
-        ):
-            padding_direction_text = (
-                "좌우 검은 여백"
-            )
 
-        else:
-            padding_direction_text = (
-                "여백 추가 불필요"
-            )
+# =========================================================
+# 페이지 설정
+# =========================================================
 
-        st.info(
-            f"목표 비율: **{video_padding_target}**  \n"
-            f"원본: **{padding_w} × {padding_h}**  \n"
-            f"적용 방식: **{padding_direction_text}**"
+st.set_page_config(
+    page_title="소재 규격 검수기",
+    layout="centered"
+)
+
+
+@st.cache_data(ttl=3600)
+def clear_cache_periodically():
+    return True
+
+
+clear_cache_periodically()
+
+
+# =========================================================
+# 공통 함수
+# =========================================================
+
+def get_ratio_str(w, h):
+
+    if h == 0:
+        return "-"
+
+    r = w / h
+
+    if abs(r - 0.75) < 0.03:
+        return "3:4"
+
+    if abs(r - 0.8) < 0.03:
+        return "4:5"
+
+    if abs(r - 0.5625) < 0.03:
+        return "9:16"
+
+    if abs(r - 1.0) < 0.03:
+        return "1:1"
+
+    if abs(r - (16 / 9)) < 0.05:
+        return "16:9"
+
+    return f"{r:.2f}:1"
+
+
+def get_target_ratio(target_format):
+
+    if target_format == "4:5":
+        return 4 / 5
+
+    elif target_format == "9:16":
+        return 9 / 16
+
+    else:
+        raise ValueError(
+            "지원하지 않는 목표 비율입니다."
         )
 
-    if st.button(
-        f"🎬 {video_padding_target} 영상 여백 추가 시작",
-        use_container_width=True,
-        key="start_video_padding"
-    ):
 
-        if not ffmpeg_available():
-            st.error(
-                "FFmpeg가 설치되어 있지 않습니다."
-            )
+def get_video_dimensions(file, file_ext):
 
-        elif padding_w <= 0 or padding_h <= 0:
-            st.error(
-                "영상 정보를 읽을 수 없습니다."
-            )
+    temp_path = None
 
-        else:
-            try:
-                with st.spinner(
-                    f"{video_padding_file.name} "
-                    f"{video_padding_target} "
-                    f"여백 추가 중..."
-                ):
-                    (
-                        result_data,
-                        original_w,
-                        original_h,
-                        result_w,
-                        result_h,
-                        fps
-                    ) = process_video(
-                        video_padding_file,
-                        "padding",
-                        video_padding_target
-                    )
+    try:
 
-                ratio_filename = (
-                    video_padding_target.replace(":", "x")
-                )
+        file.seek(0)
 
-                original_name = os.path.splitext(
-                    video_padding_file.name
-                )[0]
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_ext
+        ) as tfile:
 
-                st.session_state[
-                    "video_padding_result"
-                ] = {
-                    "data": result_data,
-                    "file_name": (
-                        f"{original_name}_"
-                        f"{ratio_filename}_"
-                        f"black_padding.mp4"
-                    ),
-                    "source_name": video_padding_file.name,
-                    "original_w": original_w,
-                    "original_h": original_h,
-                    "result_w": result_w,
-                    "result_h": result_h,
-                    "target": video_padding_target
-                }
+            tfile.write(file.read())
+            temp_path = tfile.name
 
-            except Exception as e:
-                st.session_state.pop(
-                    "video_padding_result",
-                    None
-                )
-                st.error(
-                    f"❌ {video_padding_file.name}: "
-                    f"영상 여백 추가 실패"
-                )
-                st.caption(str(e))
+        vf = cv2.VideoCapture(temp_path)
 
-    padding_result = st.session_state.get(
-        "video_padding_result"
-    )
-
-    if (
-        padding_result
-        and padding_result["source_name"]
-        == video_padding_file.name
-        and padding_result["target"]
-        == video_padding_target
-    ):
-        st.success("✅ 영상 여백 추가 완료")
-
-        st.caption(
-            f"원본: "
-            f"{padding_result['original_w']} × "
-            f"{padding_result['original_h']}"
-            f" → 결과: "
-            f"{padding_result['result_w']} × "
-            f"{padding_result['result_h']}"
-            f" / "
-            f"{get_ratio_str(padding_result['result_w'], padding_result['result_h'])}"
+        w = int(
+            vf.get(cv2.CAP_PROP_FRAME_WIDTH)
         )
-
-        st.download_button(
-            label="⬇️ 여백 영상 다운로드",
-            data=padding_result["data"],
-            file_name=padding_result["file_name"],
-            mime="video/mp4",
-            use_container_width=True,
-            key="video_padding_download"
-        )
-
