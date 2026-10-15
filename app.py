@@ -1,1695 +1,392 @@
-import streamlit as st
-from PIL import Image, ImageOps
-import cv2
-import tempfile
 import os
-import zipfile
 import json
-import subprocess
 import shutil
+import hashlib
+import zipfile
+import tempfile
+import subprocess
 from io import BytesIO
+
+import cv2
+import streamlit as st
 import streamlit.components.v1 as components
+from PIL import Image, ImageOps
+
+st.set_page_config(page_title="소재 규격 검수기", layout="centered")
+
+IMAGE_TYPES = ["jpg", "jpeg", "png", "webp"]
+VIDEO_TYPES = ["mp4", "mov", "avi"]
+PREVIEW_MAX = (720, 900)
 
 
-# =========================================================
-# 페이지 설정
-# =========================================================
-
-st.set_page_config(
-    page_title="소재 규격 검수기",
-    layout="centered"
-)
-
-
-@st.cache_data(ttl=3600)
-def clear_cache_periodically():
-    return True
-
-
-clear_cache_periodically()
-
-
-# =========================================================
-# 공통 함수
-# =========================================================
-
-def get_ratio_str(w, h):
-
-    if h == 0:
+def ratio_label(w, h):
+    if not h:
         return "-"
-
     r = w / h
-
-    if abs(r - 0.75) < 0.03:
-        return "3:4"
-
-    if abs(r - 0.8) < 0.03:
-        return "4:5"
-
-    if abs(r - 0.5625) < 0.03:
-        return "9:16"
-
-    if abs(r - 1.0) < 0.03:
-        return "1:1"
-
-    if abs(r - (16 / 9)) < 0.05:
-        return "16:9"
-
+    for label, value, tolerance in [("3:4", .75, .03), ("4:5", .8, .03), ("9:16", 9/16, .03), ("1:1", 1, .03), ("16:9", 16/9, .05)]:
+        if abs(r-value) < tolerance:
+            return label
     return f"{r:.2f}:1"
 
 
-def get_target_ratio(target_format):
-
-    if target_format == "4:5":
-        return 4 / 5
-
-    elif target_format == "9:16":
-        return 9 / 16
-
-    else:
-        raise ValueError(
-            "지원하지 않는 목표 비율입니다."
-        )
+def target_ratio(fmt):
+    return 4/5 if fmt == "4:5" else 9/16
 
 
-def get_video_dimensions(file, file_ext):
+def file_identity(upload):
+    # Streamlit 업로드 객체에서 추가적인 전체 바이트 복사를 하지 않음
+    return (upload.name, upload.size, hashlib.sha256(upload.getbuffer()).hexdigest())
 
-    temp_path = None
 
+def temp_upload(upload):
+    suffix = os.path.splitext(upload.name)[1].lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as out:
+        upload.seek(0)
+        shutil.copyfileobj(upload, out, length=1024*1024)
+        return out.name
+
+
+def get_video_info(upload):
+    # 동일 파일의 메타데이터는 세션 내에서 재사용. 큰 파일을 캐시로 복제하지 않음.
+    key = f"meta:{file_identity(upload)}"
+    if key in st.session_state:
+        return st.session_state[key]
+    path = None
     try:
-
-        file.seek(0)
-
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=file_ext
-        ) as tfile:
-
-            tfile.write(file.read())
-            temp_path = tfile.name
-
-        vf = cv2.VideoCapture(temp_path)
-
-        w = int(
-            vf.get(cv2.CAP_PROP_FRAME_WIDTH)
-        )
-
-        h = int(
-            vf.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        )
-
-        fps = vf.get(
-            cv2.CAP_PROP_FPS
-        )
-
-        frame_count = int(
-            vf.get(cv2.CAP_PROP_FRAME_COUNT)
-        )
-
-        vf.release()
-
-        duration = 0
-
-        if fps and fps > 0:
-            duration = frame_count / fps
-
-        return (
-            w,
-            h,
-            fps,
-            duration
-        )
-
+        path = temp_upload(upload)
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            result = (0, 0, 0.0, 0.0)
+        else:
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+            frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            result = (w, h, fps, frames/fps if fps > 0 else 0.0)
+        st.session_state[key] = result
+        return result
     except Exception:
-
-        return (
-            0,
-            0,
-            0,
-            0
-        )
-
+        return 0, 0, 0.0, 0.0
     finally:
-
-        if (
-            temp_path
-            and os.path.exists(temp_path)
-        ):
-            os.remove(temp_path)
+        if path and os.path.exists(path):
+            os.remove(path)
 
 
-def save_image_to_buffer(
-    img,
-    file_ext
-):
-
-    buffer = BytesIO()
-
-    if file_ext == ".png":
-
-        img.save(
-            buffer,
-            format="PNG",
-            optimize=False
-        )
-
-        download_ext = ".png"
-        mime_type = "image/png"
-
-    elif file_ext == ".webp":
-
-        img.save(
-            buffer,
-            format="WEBP",
-            lossless=True,
-            quality=100,
-            method=6
-        )
-
-        download_ext = ".webp"
-        mime_type = "image/webp"
-
-    else:
-
-        if img.mode not in (
-            "RGB",
-            "L"
-        ):
-            img = img.convert("RGB")
-
-        img.save(
-            buffer,
-            format="JPEG",
-            quality=100,
-            subsampling=0,
-            optimize=False
-        )
-
-        download_ext = ".jpg"
-        mime_type = "image/jpeg"
-
-    buffer.seek(0)
-
-    return (
-        buffer.getvalue(),
-        download_ext,
-        mime_type
-    )
+def load_image(upload):
+    upload.seek(0)
+    with Image.open(upload) as original:
+        return ImageOps.exif_transpose(original).copy()
 
 
-# =========================================================
-# 이미지 크롭 / 검은 여백 (4:5 / 9:16)
-# =========================================================
+def preview_image(img):
+    small = img.copy()
+    small.thumbnail(PREVIEW_MAX, Image.Resampling.LANCZOS)
+    return small
 
-def crop_image_to_target(img, target_format, crop_position="중앙"):
-    target_ratio = get_target_ratio(target_format)
+
+def crop_image(img, fmt, position):
     w, h = img.size
-    current_ratio = w / h
-
-    if abs(current_ratio - target_ratio) < 0.001:
+    ratio = target_ratio(fmt)
+    if abs(w/h - ratio) < .001:
         return img.copy()
-
-    # 가로가 넓음 → 좌우 크롭
-    if current_ratio > target_ratio:
-        new_width = round(h * target_ratio)
-
-        if crop_position == "좌측":
-            left = 0
-        elif crop_position == "우측":
-            left = w - new_width
-        else:
-            left = (w - new_width) // 2
-
-        return img.crop((left, 0, left + new_width, h))
-
-    # 세로가 김 → 상하 크롭
-    new_height = round(w / target_ratio)
-
-    if crop_position == "상단":
-        top = 0
-    elif crop_position == "하단":
-        top = h - new_height
-    else:
-        top = (h - new_height) // 2
-
-    return img.crop((0, top, w, top + new_height))
+    if w/h > ratio:
+        new_w = round(h * ratio)
+        x = 0 if position == "좌측" else w-new_w if position == "우측" else (w-new_w)//2
+        return img.crop((x, 0, x+new_w, h))
+    new_h = round(w/ratio)
+    y = 0 if position == "상단" else h-new_h if position == "하단" else (h-new_h)//2
+    return img.crop((0, y, w, y+new_h))
 
 
-def add_black_padding_to_target(img, target_format):
-    target_ratio = get_target_ratio(target_format)
+def pad_image(img, fmt):
     w, h = img.size
-    current_ratio = w / h
-
-    if abs(current_ratio - target_ratio) < 0.001:
+    ratio = target_ratio(fmt)
+    if abs(w/h - ratio) < .001:
         return img.copy(), "여백 추가 불필요"
-
-    # 가로가 넓음 → 상하 검은 여백
-    if current_ratio > target_ratio:
-        new_height = round(w / target_ratio)
-        canvas = Image.new("RGB", (w, new_height), (0, 0, 0))
-        top = (new_height - h) // 2
-
-        if img.mode == "RGBA":
-            canvas.paste(img, (0, top), img)
-        else:
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            canvas.paste(img, (0, top))
-
-        return canvas, "상하 여백"
-
-    # 세로가 김 → 좌우 검은 여백
-    new_width = round(h * target_ratio)
-    canvas = Image.new("RGB", (new_width, h), (0, 0, 0))
-    left = (new_width - w) // 2
-
+    if w/h > ratio:
+        new_w, new_h, label = w, round(w/ratio), "상하 여백"
+    else:
+        new_w, new_h, label = round(h*ratio), h, "좌우 여백"
+    canvas = Image.new("RGB", (new_w, new_h), "black")
+    x, y = (new_w-w)//2, (new_h-h)//2
     if img.mode == "RGBA":
-        canvas.paste(img, (left, 0), img)
+        canvas.paste(img, (x, y), img)
     else:
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        canvas.paste(img, (left, 0))
-
-    return canvas, "좌우 여백"
+        canvas.paste(img.convert("RGB"), (x, y))
+    return canvas, label
 
 
-# =========================================================
-# FFmpeg
-# =========================================================
+def image_bytes(img, extension):
+    out = BytesIO()
+    if extension == ".png":
+        img.save(out, "PNG", optimize=False)
+        return out.getvalue(), ".png", "image/png"
+    if extension == ".webp":
+        img.save(out, "WEBP", lossless=True, quality=100, method=6)
+        return out.getvalue(), ".webp", "image/webp"
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    img.save(out, "JPEG", quality=100, subsampling=0, optimize=False)
+    return out.getvalue(), ".jpg", "image/jpeg"
 
-def ffmpeg_available():
 
-    return (
-        shutil.which("ffmpeg")
-        is not None
-    )
+def video_filter(w, h, fmt, mode, position="중앙"):
+    ratio = target_ratio(fmt)
+    if mode == "crop":
+        if abs(w/h-ratio) < .001:
+            return None
+        if w/h > ratio:
+            cw = max(2, int(h*ratio)//2*2)
+            x = 0 if position == "좌측" else w-cw if position == "우측" else (w-cw)//2
+            return f"crop={cw}:{h}:{max(0,x//2*2)}:0"
+        ch = max(2, int(w/ratio)//2*2)
+        y = 0 if position == "상단" else h-ch if position == "하단" else (h-ch)//2
+        return f"crop={w}:{ch}:0:{max(0,y//2*2)}"
+    if abs(w/h-ratio) < .001:
+        return None
+    if w/h > ratio:
+        nh = max(h, int(w/ratio + .999999))
+        nh += nh % 2
+        return f"pad={w}:{nh}:0:(oh-ih)/2:black"
+    nw = max(w, int(h*ratio + .999999))
+    nw += nw % 2
+    return f"pad={nw}:{h}:(ow-iw)/2:0:black"
 
 
-def run_ffmpeg(
-    input_path,
-    output_path,
-    video_filter
-):
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-
-        "-i",
-        input_path,
-
-        "-vf",
-        video_filter,
-
-        # H.264 고화질 인코딩
-        "-c:v",
-        "libx264",
-
-        # 육안상 원본과 차이를 최소화
-        "-crf",
-        "16",
-
-        # Cloud CPU 부담 완화
-        "-preset",
-        "fast",
-
-        # CPU 폭주 방지
-        "-threads",
-        "2",
-
-        # SNS / 브라우저 호환성
-        "-pix_fmt",
-        "yuv420p",
-
-        # 오디오는 재인코딩하지 않고 원본 그대로 복사
-        "-c:a",
-        "copy",
-
-        "-movflags",
-        "+faststart",
-
-        output_path
-    ]
-
+def transform_video(upload, fmt, mode, position):
+    src = dst = None
     try:
-        process = subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=300
-        )
-
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            "영상 변환 시간이 5분을 초과했습니다. "
-            "영상 길이 또는 해상도가 너무 클 수 있습니다."
-        )
-
-    if process.returncode != 0:
-        error_message = (
-            process.stderr[-2000:]
-            if process.stderr
-            else "알 수 없는 FFmpeg 오류"
-        )
-
-        raise RuntimeError(error_message)
-
-
-# =========================================================
-# 영상 크롭 필터
-# =========================================================
-
-def get_video_crop_filter(
-    w,
-    h,
-    target_format,
-    position
-):
-
-    target_ratio = get_target_ratio(
-        target_format
-    )
-
-    current_ratio = w / h
-
-    # 이미 목표 비율
-    if abs(
-        current_ratio - target_ratio
-    ) < 0.001:
-
-        return (
-            f"crop={w}:{h}:0:0"
-        )
-
-    # =====================================================
-    # 원본이 목표보다 가로로 넓음
-    # → 좌우를 자름
-    # =====================================================
-
-    if current_ratio > target_ratio:
-
-        crop_w = int(
-            h * target_ratio
-        )
-
-        # H.264 호환성을 위해 짝수
-        crop_w -= (
-            crop_w % 2
-        )
-
-        if position == "좌측":
-
-            x = 0
-
-        elif position == "우측":
-
-            x = w - crop_w
-
-        else:
-
-            x = (
-                w - crop_w
-            ) // 2
-
-        x -= (
-            x % 2
-        )
-
-        return (
-            f"crop="
-            f"{crop_w}:"
-            f"{h}:"
-            f"{x}:"
-            f"0"
-        )
-
-    # =====================================================
-    # 원본이 목표보다 세로로 김
-    # → 상하를 자름
-    # =====================================================
-
-    else:
-
-        crop_h = int(
-            w / target_ratio
-        )
-
-        crop_h -= (
-            crop_h % 2
-        )
-
-        if position == "상단":
-
-            y = 0
-
-        elif position == "하단":
-
-            y = h - crop_h
-
-        else:
-
-            y = (
-                h - crop_h
-            ) // 2
-
-        y -= (
-            y % 2
-        )
-
-        return (
-            f"crop="
-            f"{w}:"
-            f"{crop_h}:"
-            f"0:"
-            f"{y}"
-        )
-
-
-# =========================================================
-# 영상 검은 여백 필터
-# =========================================================
-
-def get_video_padding_filter(
-    w,
-    h,
-    target_format
-):
-
-    target_ratio = get_target_ratio(
-        target_format
-    )
-
-    current_ratio = w / h
-
-    # 이미 목표 비율
-    if abs(
-        current_ratio - target_ratio
-    ) < 0.001:
-
-        return (
-            f"pad={w}:{h}:0:0:black"
-        )
-
-    # =====================================================
-    # 원본이 목표보다 가로로 넓음
-    # → 상하 검은 여백
-    # =====================================================
-
-    if current_ratio > target_ratio:
-
-        new_h = int(
-            w / target_ratio
-        )
-
-        if new_h % 2 != 0:
-            new_h += 1
-
-        y = (
-            new_h - h
-        ) // 2
-
-        y -= (
-            y % 2
-        )
-
-        return (
-            f"pad="
-            f"{w}:"
-            f"{new_h}:"
-            f"0:"
-            f"{y}:"
-            f"black"
-        )
-
-    # =====================================================
-    # 원본이 목표보다 세로로 김
-    # → 좌우 검은 여백
-    # =====================================================
-
-    else:
-
-        new_w = int(
-            h * target_ratio
-        )
-
-        if new_w % 2 != 0:
-            new_w += 1
-
-        x = (
-            new_w - w
-        ) // 2
-
-        x -= (
-            x % 2
-        )
-
-        return (
-            f"pad="
-            f"{new_w}:"
-            f"{h}:"
-            f"{x}:"
-            f"0:"
-            f"black"
-        )
-
-
-# =========================================================
-# 영상 처리 공통
-# =========================================================
-
-def process_video(
-    uploaded_file,
-    mode,
-    target_format,
-    crop_position="중앙"
-):
-
-    input_path = None
-    output_path = None
-
-    try:
-        original_ext = os.path.splitext(
-            uploaded_file.name
-        )[1].lower()
-
-        uploaded_file.seek(0)
-
-        # read()로 원본 전체를 한 번 더 복제하지 않고
-        # 업로드 스트림을 바로 임시파일로 복사
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=original_ext
-        ) as temp_input:
-            shutil.copyfileobj(
-                uploaded_file,
-                temp_input,
-                length=1024 * 1024
-            )
-            input_path = temp_input.name
-
-        vf = cv2.VideoCapture(input_path)
-
-        if not vf.isOpened():
-            raise RuntimeError(
-                "영상을 열 수 없습니다."
-            )
-
-        w = int(
-            vf.get(cv2.CAP_PROP_FRAME_WIDTH)
-        )
-        h = int(
-            vf.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        )
-        fps = vf.get(
-            cv2.CAP_PROP_FPS
-        )
-
-        vf.release()
-
-        if w <= 0 or h <= 0:
-            raise RuntimeError(
-                "영상 해상도를 확인할 수 없습니다."
-            )
-
-        if mode == "crop":
-            video_filter = get_video_crop_filter(
-                w,
-                h,
-                target_format,
-                crop_position
-            )
-
-        elif mode == "padding":
-            video_filter = get_video_padding_filter(
-                w,
-                h,
-                target_format
-            )
-
-        else:
-            raise RuntimeError(
-                "지원하지 않는 영상 처리 방식입니다."
-            )
-
-        fd, output_path = tempfile.mkstemp(
-            suffix=".mp4"
-        )
+        src = temp_upload(upload)
+        cap = cv2.VideoCapture(src)
+        if not cap.isOpened():
+            raise RuntimeError("영상을 열 수 없습니다.")
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        if not w or not h:
+            raise RuntimeError("영상 해상도를 확인할 수 없습니다.")
+        filt = video_filter(w, h, fmt, mode, position)
+        if filt is None:
+            # 비율이 이미 일치하면 재인코딩 없이 MP4로 remux
+            filt = None
+        fd, dst = tempfile.mkstemp(suffix=".mp4")
         os.close(fd)
-        os.remove(output_path)
-
-        run_ffmpeg(
-            input_path,
-            output_path,
-            video_filter
-        )
-
-        if (
-            not os.path.exists(output_path)
-            or os.path.getsize(output_path) <= 0
-        ):
-            raise RuntimeError(
-                "변환된 영상 파일이 정상적으로 생성되지 않았습니다."
-            )
-
-        result_vf = cv2.VideoCapture(
-            output_path
-        )
-
-        result_w = int(
-            result_vf.get(cv2.CAP_PROP_FRAME_WIDTH)
-        )
-        result_h = int(
-            result_vf.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        )
-
-        result_vf.release()
-
-        # 다운로드에 필요한 최종 결과만 마지막에 1회 메모리에 로드
-        with open(output_path, "rb") as result_file:
-            result_data = result_file.read()
-
-        return (
-            result_data,
-            w,
-            h,
-            result_w,
-            result_h,
-            fps
-        )
-
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", src]
+        if filt:
+            cmd += ["-vf", filt, "-c:v", "libx264", "-crf", "16", "-preset", "fast", "-threads", "2", "-pix_fmt", "yuv420p"]
+        else:
+            cmd += ["-c:v", "copy"]
+        cmd += ["-c:a", "copy", "-movflags", "+faststart", dst]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("영상 변환 시간이 5분을 초과했습니다.")
+        if result.returncode:
+            raise RuntimeError((result.stderr or "FFmpeg 오류")[-1800:])
+        cap = cv2.VideoCapture(dst)
+        rw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        rh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        with open(dst, "rb") as f:
+            data = f.read()
+        return data, (w, h), (rw, rh)
     finally:
-        if (
-            input_path
-            and os.path.exists(input_path)
-        ):
+        for path in (src, dst):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+def copy_button(value):
+    data = json.dumps(value, ensure_ascii=False)
+    components.html(f'''<button id="copy" style="width:100%;padding:11px;border:1px solid #ddd;border-radius:8px;background:white;cursor:pointer" onclick="copyText()">📋 검수 결과 복사</button>
+    <script>async function copyText(){{let t={data};try{{await navigator.clipboard.writeText(t)}}catch(e){{let a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();document.execCommand('copy');a.remove()}}let b=document.getElementById('copy');b.innerText='✅ 복사 완료';setTimeout(()=>b.innerText='📋 검수 결과 복사',1500)}}</script>''', height=55)
+
+
+@st.fragment
+def validation_section():
+    st.header("🔍 소재 검수")
+    option = st.radio("검수할 유형을 선택하세요", ["이미지", "영상", "캐러셀"], horizontal=True, key="check_type")
+    files = st.file_uploader(f"{option} 파일을 선택하세요", accept_multiple_files=True, key="check_uploader")
+    if not files:
+        return
+    results = []
+    for upload in files:
+        ext = os.path.splitext(upload.name)[1].lower()
+        if option == "이미지" or (option == "캐러셀" and ext in (".jpg", ".jpeg", ".png", ".webp")):
             try:
-                os.remove(input_path)
-            except OSError:
-                pass
-
-        if (
-            output_path
-            and os.path.exists(output_path)
-        ):
-            try:
-                os.remove(output_path)
-            except OSError:
-                pass
-
-
-# =========================================================
-# 메인
-# =========================================================
-
-st.title(
-    "📏 광고 소재 사이즈 검수 툴"
-)
-
-st.caption(
-    "업로드하신 소재의 비율을 자동으로 체크합니다."
-)
-
-st.markdown(
-    "상세 내용은 "
-    "[**[ 광고 소재 가이드 ]**]"
-    "(https://fastpaepr.myportfolio.com/1696f1f311accb) "
-    "확인 부탁드립니다."
-)
-
-st.write("")
-
-
-# =========================================================
-# 1. 소재 검수
-# =========================================================
-
-option = st.radio(
-    "검수할 유형을 선택하세요",
-    [
-        "이미지",
-        "영상",
-        "캐러셀"
-    ],
-    horizontal=True
-)
-
-
-uploaded_files = st.file_uploader(
-    f"{option} 파일을 선택하세요",
-    accept_multiple_files=True,
-    key="check_uploader"
-)
-
-
-results = []
-
-
-if uploaded_files:
-
-    st.subheader(
-        "🔍 검수 결과"
-    )
-
-    for uploaded_file in uploaded_files:
-
-        file_ext = os.path.splitext(
-            uploaded_file.name
-        )[1].lower()
-
-        # 이미지 / 캐러셀 이미지
-        if (
-            option == "이미지"
-            or (
-                option == "캐러셀"
-                and file_ext in [
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp"
-                ]
-            )
-        ):
-
-            try:
-
-                uploaded_file.seek(0)
-
-                with Image.open(
-                    uploaded_file
-                ) as img:
-
-                    img = (
-                        ImageOps.exif_transpose(
-                            img
-                        )
-                    )
-
-                    w, h = img.size
-
-                r_str = get_ratio_str(
-                    w,
-                    h
-                )
-
-                if abs(
-                    (w / h) - 0.8
-                ) < 0.05:
-
-                    results.append(
-                        f"✅ {uploaded_file.name}: "
-                        f"이상없음 "
-                        f"({w}x{h}, {r_str})"
-                    )
-
+                img = load_image(upload)
+                w, h = img.size
+                label = ratio_label(w, h)
+                if abs(w/h-.8) < .05:
+                    results.append(f"✅ {upload.name}: 이상없음 ({w}x{h}, {label})")
                 else:
-
-                    results.append(
-                        f"❌ {uploaded_file.name}: "
-                        f"이미지 사이즈가 틀립니다. "
-                        f"4:5 사이즈로 수정이 필요합니다. "
-                        f"(현재 {w}x{h}, {r_str})"
-                    )
-
+                    results.append(f"❌ {upload.name}: 이미지 사이즈가 틀립니다. 4:5 사이즈로 수정이 필요합니다. (현재 {w}x{h}, {label})")
+                img.close()
             except Exception:
-
-                results.append(
-                    f"❌ {uploaded_file.name}: "
-                    f"파일을 읽는 중 오류가 발생했습니다."
-                )
-
-        # 영상 / 캐러셀 영상
-        elif (
-            option == "영상"
-            or (
-                option == "캐러셀"
-                and file_ext in [
-                    ".mp4",
-                    ".mov",
-                    ".avi"
-                ]
-            )
-        ):
-
-            (
-                w,
-                h,
-                fps,
-                duration
-            ) = get_video_dimensions(
-                uploaded_file,
-                file_ext
-            )
-
-            if w == 0 or h == 0:
-
-                results.append(
-                    f"❌ {uploaded_file.name}: "
-                    f"영상 데이터를 읽을 수 없습니다."
-                )
-
+                results.append(f"❌ {upload.name}: 파일을 읽는 중 오류가 발생했습니다.")
+        elif option == "영상" or (option == "캐러셀" and ext in (".mp4", ".mov", ".avi")):
+            w, h, _, _ = get_video_info(upload)
+            if not w or not h:
+                results.append(f"❌ {upload.name}: 영상 데이터를 읽을 수 없습니다.")
                 continue
-
-            r_str = get_ratio_str(
-                w,
-                h
-            )
-
-            ratio = w / h
-
-            # 일반 영상 = 9:16
+            label = ratio_label(w, h)
+            r = w/h
             if option == "영상":
-
-                if abs(
-                    ratio - (9 / 16)
-                ) < 0.05:
-
-                    results.append(
-                        f"✅ {uploaded_file.name}: "
-                        f"이상없음 "
-                        f"({w}x{h}, {r_str})"
-                    )
-
-                else:
-
-                    results.append(
-                        f"⚠️ {uploaded_file.name}: "
-                        f"현재 사이즈가 "
-                        f"{w}x{h} ({r_str})입니다. "
-                        f"9:16 사이즈가 아니므로, "
-                        f"그대로 진행 시 위아래가 "
-                        f"잘려 업로드됩니다."
-                    )
-
-            # 캐러셀 영상 = 4:5
-            elif option == "캐러셀":
-
-                if abs(
-                    ratio - 0.8
-                ) < 0.05:
-
-                    results.append(
-                        f"✅ {uploaded_file.name}: "
-                        f"이상없음 "
-                        f"({w}x{h}, {r_str})"
-                    )
-
-                elif abs(
-                    ratio - (16 / 9)
-                ) < 0.1:
-
-                    results.append(
-                        f"❌ {uploaded_file.name}: "
-                        f"가로형(16:9) 영상입니다. "
-                        f"위아래 검은색 바를 추가하여 "
-                        f"4:5 비율로 수정 후 전달 부탁드립니다. "
-                        f"(패스트페이퍼 수정 불가, "
-                        f"현재 {w}x{h})"
-                    )
-
-                else:
-
-                    results.append(
-                        f"⚠️ {uploaded_file.name}: "
-                        f"4:5 비율이 아닙니다. "
-                        f"그대로 진행 시 위아래가 "
-                        f"잘릴 수 있습니다. "
-                        f"(현재 {w}x{h}, {r_str})"
-                    )
-
+                results.append(f"✅ {upload.name}: 이상없음 ({w}x{h}, {label})" if abs(r-9/16)<.05 else f"⚠️ {upload.name}: 현재 사이즈가 {w}x{h} ({label})입니다. 9:16 사이즈가 아니므로, 그대로 진행 시 위아래가 잘려 업로드됩니다.")
+            elif abs(r-.8)<.05:
+                results.append(f"✅ {upload.name}: 이상없음 ({w}x{h}, {label})")
+            elif abs(r-16/9)<.1:
+                results.append(f"❌ {upload.name}: 가로형(16:9) 영상입니다. 위아래 검은색 바를 추가하여 4:5 비율로 수정 후 전달 부탁드립니다. (패스트페이퍼 수정 불가, 현재 {w}x{h})")
+            else:
+                results.append(f"⚠️ {upload.name}: 4:5 비율이 아닙니다. 그대로 진행 시 위아래가 잘릴 수 있습니다. (현재 {w}x{h}, {label})")
         else:
-
-            results.append(
-                f"❌ {uploaded_file.name}: "
-                f"지원하지 않는 파일 형식입니다."
-            )
-
-
-# =========================================================
-# 검수 결과 출력
-# =========================================================
-
-if results:
-
-    result_text = "\n".join(
-        results
-    )
-
-    st.code(
-        result_text,
-        language=None,
-        wrap_lines=True
-    )
-
-    result_text_json = json.dumps(
-        result_text,
-        ensure_ascii=False
-    )
-
-    components.html(
-        f"""
-        <button
-            id="copyButton"
-            onclick="copyResults()"
-            style="
-                width:100%;
-                padding:11px 15px;
-                background:white;
-                color:#262730;
-                border:1px solid #d6d6d6;
-                border-radius:8px;
-                font-size:14px;
-                font-weight:600;
-                cursor:pointer;
-            "
-        >
-            📋 검수 결과 복사
-        </button>
-
-        <script>
-
-        const resultText =
-            {result_text_json};
-
-        async function copyResults() {{
-
-            const button =
-                document.getElementById(
-                    "copyButton"
-                );
-
-            try {{
-
-                await navigator.clipboard
-                    .writeText(
-                        resultText
-                    );
-
-            }} catch (err) {{
-
-                const textarea =
-                    document.createElement(
-                        "textarea"
-                    );
-
-                textarea.value =
-                    resultText;
-
-                document.body.appendChild(
-                    textarea
-                );
-
-                textarea.select();
-
-                document.execCommand(
-                    "copy"
-                );
-
-                document.body.removeChild(
-                    textarea
-                );
-            }}
-
-            button.innerText =
-                "✅ 복사 완료";
-
-            setTimeout(
-                function() {{
-
-                    button.innerText =
-                        "📋 검수 결과 복사";
-
-                }},
-                1500
-            );
-        }}
-
-        </script>
-        """,
-        height=55
-    )
-
-
-# =========================================================
-# 안내사항
-# =========================================================
-
-st.divider()
-
-
-st.info(
-    f"""
-**💡 {option} 안내사항**
-
-- 다른 사이즈로 전달 주신 경우 위아래가 잘릴 수 있습니다.
-- 소재 위아래가 잘려 업로드 되더라도 이상이 없다면 진행하셔도 무관합니다.
-- **캐러셀 내 영상이 가로형(16:9)일 경우**: 위아래 검은색 바를 추가하여 4:5로 업로드 가능합니다.
-- **주의**: 패스트페이퍼에서 별도 영상을 수정할 수 없습니다. 브랜드 측에서 수정하여 전달 필요합니다.
-"""
-)
-
-
-st.warning(
-    """
-**📢 공통 안내사항**
-
-1. 메타 가이드 상 해시태그는 **'#광고'를 포함한 5개까지** 가능합니다.  
-   (추가적인 해시태그는 댓글로 작성이 가능합니다.)
-
-2. 릴스 소재로 여러 미디어에 노출 시, 메타에서 "추천하지 않는 게시글"로 분류할 가능성이 있습니다.  
-   이미지 에셋과 함께 **캐러셀 형태를 권장**드립니다.  
-   * 이 내용은 매체 가이드가 아닌 메타 가이드인 점 참고 부탁드립니다.
-"""
-)
-
-
-# =========================================================
-# 2. 이미지 크롭 (4:5 / 9:16)
-# =========================================================
-
-st.divider()
-st.header("✂️ 이미지 크롭")
-st.caption("원본 이미지를 확대/축소하지 않고 선택한 비율로 크롭합니다.")
-
-image_crop_target = st.radio(
-    "변환할 이미지 비율",
-    ["4:5", "9:16"],
-    horizontal=True,
-    key="image_crop_target"
-)
-
-crop_files = st.file_uploader(
-    "크롭할 이미지를 선택하세요",
-    type=["jpg", "jpeg", "png", "webp"],
-    accept_multiple_files=True,
-    key="crop_uploader"
-)
-
-crop_horizontal_position = st.radio(
-    "좌우 크롭 기준",
-    ["좌측", "중앙", "우측"],
-    horizontal=True,
-    key="crop_horizontal_position"
-)
-
-crop_vertical_position = st.radio(
-    "상하 크롭 기준",
-    ["상단", "중앙", "하단"],
-    horizontal=True,
-    key="crop_vertical_position"
-)
-
-if crop_files:
-    st.subheader("🖼️ 크롭 결과")
-    zip_buffer = BytesIO()
-    success_count = 0
-
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for index, crop_file in enumerate(crop_files):
-            try:
-                file_ext = os.path.splitext(crop_file.name)[1].lower()
-                crop_file.seek(0)
-
-                img = Image.open(crop_file)
-                img = ImageOps.exif_transpose(img)
-
-                original_w, original_h = img.size
-                target_ratio = get_target_ratio(image_crop_target)
-                current_ratio = original_w / original_h
-
-                if current_ratio > target_ratio:
-                    applied_position = crop_horizontal_position
-                elif current_ratio < target_ratio:
-                    applied_position = crop_vertical_position
-                else:
-                    applied_position = "중앙"
-
-                cropped_img = crop_image_to_target(
-                    img,
-                    image_crop_target,
-                    applied_position
-                )
-
-                new_w, new_h = cropped_img.size
-
-                st.write(f"**{crop_file.name}**")
-                st.caption(
-                    f"원본: {original_w} × {original_h}"
-                    f" → 크롭: {new_w} × {new_h}"
-                    f" / {image_crop_target}"
-                )
-
-                st.image(
-                    cropped_img,
-                    caption=f"{image_crop_target} 크롭 ({applied_position})",
-                    use_container_width=True
-                )
-
-                file_data, download_ext, mime_type = save_image_to_buffer(
-                    cropped_img,
-                    file_ext
-                )
-
-                original_name = os.path.splitext(crop_file.name)[0]
-                ratio_filename = image_crop_target.replace(":", "x")
-                download_filename = (
-                    f"{original_name}_{ratio_filename}{download_ext}"
-                )
-
-                st.download_button(
-                    label=f"⬇️ {crop_file.name} 다운로드",
-                    data=file_data,
-                    file_name=download_filename,
-                    mime=mime_type,
-                    key=f"crop_download_{index}"
-                )
-
-                zip_file.writestr(download_filename, file_data)
-                success_count += 1
-                st.divider()
-
-            except Exception as e:
-                st.error(
-                    f"❌ {crop_file.name}: 이미지 처리 중 오류가 발생했습니다."
-                )
-                st.caption(str(e))
-
-    if success_count > 0:
-        zip_buffer.seek(0)
-        ratio_filename = image_crop_target.replace(":", "x")
-
-        st.subheader("📦 전체 다운로드")
-        st.download_button(
-            label=(
-                f"⬇️ 전체 {image_crop_target} 크롭 이미지 다운로드 "
-                f"({success_count}개)"
-            ),
-            data=zip_buffer.getvalue(),
-            file_name=f"{ratio_filename}_cropped_images.zip",
-            mime="application/zip",
-            use_container_width=True,
-            key="download_all_crop"
-        )
-
-
-# =========================================================
-# 3. 이미지 검은 여백 (4:5 / 9:16)
-# =========================================================
-
-st.divider()
-st.header("⬛ 이미지 여백 추가")
-st.caption(
-    "원본 이미지를 확대/축소하지 않고 검은색 RGB(0,0,0) 여백을 "
-    "추가하여 선택한 비율로 만듭니다."
-)
-
-image_padding_target = st.radio(
-    "변환할 이미지 비율",
-    ["4:5", "9:16"],
-    horizontal=True,
-    key="image_padding_target"
-)
-
-padding_files = st.file_uploader(
-    "여백을 추가할 이미지를 선택하세요",
-    type=["jpg", "jpeg", "png", "webp"],
-    accept_multiple_files=True,
-    key="padding_uploader"
-)
-
-if padding_files:
-    st.info(
-        f"목표 비율은 **{image_padding_target}**입니다.  \n"
-        "원본이 목표보다 가로로 넓으면 → **상하 검은 여백**  \n"
-        "원본이 목표보다 세로로 길면 → **좌우 검은 여백**"
-    )
-
-    st.subheader("🖼️ 여백 추가 결과")
-    padding_zip_buffer = BytesIO()
-    padding_success_count = 0
-
-    with zipfile.ZipFile(
-        padding_zip_buffer,
-        "w",
-        zipfile.ZIP_DEFLATED
-    ) as padding_zip_file:
-
-        for index, padding_file in enumerate(padding_files):
-            try:
-                file_ext = os.path.splitext(padding_file.name)[1].lower()
-                padding_file.seek(0)
-
-                img = Image.open(padding_file)
-                img = ImageOps.exif_transpose(img)
-
-                original_w, original_h = img.size
-
-                padded_img, applied_direction = add_black_padding_to_target(
-                    img,
-                    image_padding_target
-                )
-
-                new_w, new_h = padded_img.size
-
-                st.write(f"**{padding_file.name}**")
-                st.caption(
-                    f"원본: {original_w} × {original_h}"
-                    f" → 여백 추가: {new_w} × {new_h}"
-                    f" / {image_padding_target}"
-                    f" / {applied_direction}"
-                )
-
-                st.image(
-                    padded_img,
-                    caption=f"{image_padding_target} / {applied_direction}",
-                    use_container_width=True
-                )
-
-                file_data, download_ext, mime_type = save_image_to_buffer(
-                    padded_img,
-                    file_ext
-                )
-
-                original_name = os.path.splitext(padding_file.name)[0]
-                ratio_filename = image_padding_target.replace(":", "x")
-                download_filename = (
-                    f"{original_name}_{ratio_filename}_black_padding"
-                    f"{download_ext}"
-                )
-
-                st.download_button(
-                    label=f"⬇️ {padding_file.name} 다운로드",
-                    data=file_data,
-                    file_name=download_filename,
-                    mime=mime_type,
-                    key=f"padding_download_{index}"
-                )
-
-                padding_zip_file.writestr(download_filename, file_data)
-                padding_success_count += 1
-                st.divider()
-
-            except Exception as e:
-                st.error(
-                    f"❌ {padding_file.name}: 여백 추가 중 오류가 발생했습니다."
-                )
-                st.caption(str(e))
-
-    if padding_success_count > 0:
-        padding_zip_buffer.seek(0)
-        ratio_filename = image_padding_target.replace(":", "x")
-
-        st.subheader("📦 전체 다운로드")
-        st.download_button(
-            label=(
-                f"⬇️ 전체 {image_padding_target} 여백 이미지 다운로드 "
-                f"({padding_success_count}개)"
-            ),
-            data=padding_zip_buffer.getvalue(),
-            file_name=f"{ratio_filename}_black_padding_images.zip",
-            mime="application/zip",
-            use_container_width=True,
-            key="download_all_padding"
-        )
-
-
-# =========================================================
-# 4. 영상 크롭
-# =========================================================
-
-st.divider()
-
-st.header("🎬 영상 크롭")
-
-st.caption(
-    "원본 영상을 확대/축소하지 않고 "
-    "선택한 비율의 영역만 크롭합니다. "
-    "영상은 한 번에 1개씩 처리합니다."
-)
-
-video_crop_target = st.radio(
-    "변환할 영상 비율",
-    ["4:5", "9:16"],
-    horizontal=True,
-    key="video_crop_target"
-)
-
-if not ffmpeg_available():
-    st.error(
-        "FFmpeg가 설치되어 있지 않습니다. "
-        "packages.txt에 ffmpeg를 추가해주세요."
-    )
-
-video_crop_file = st.file_uploader(
-    "크롭할 영상을 선택하세요",
-    type=["mp4", "mov", "avi"],
-    accept_multiple_files=False,
-    key="video_crop_uploader"
-)
-
-video_crop_position = "중앙"
-
-if video_crop_file:
-
-    file_ext = os.path.splitext(
-        video_crop_file.name
-    )[1].lower()
-
-    (
-        video_w,
-        video_h,
-        video_fps,
-        video_duration
-    ) = get_video_dimensions(
-        video_crop_file,
-        file_ext
-    )
-
-    if video_w > 0 and video_h > 0:
-
-        current_ratio = video_w / video_h
-        target_ratio = get_target_ratio(
-            video_crop_target
-        )
-
-        st.caption(
-            f"원본: {video_w} × {video_h} "
-            f"/ {get_ratio_str(video_w, video_h)}"
-        )
-
-        if current_ratio > target_ratio:
-            video_crop_position = st.radio(
-                "크롭 기준",
-                ["좌측", "중앙", "우측"],
-                horizontal=True,
-                key="video_crop_horizontal"
-            )
-
-        elif current_ratio < target_ratio:
-            video_crop_position = st.radio(
-                "크롭 기준",
-                ["상단", "중앙", "하단"],
-                horizontal=True,
-                key="video_crop_vertical"
-            )
-
+            results.append(f"❌ {upload.name}: 지원하지 않는 파일 형식입니다.")
+    text = "\n".join(results)
+    st.code(text, language=None, wrap_lines=True)
+    copy_button(text)
+
+
+@st.fragment
+def image_section(mode):
+    crop = mode == "crop"
+    prefix = "crop" if crop else "padding"
+    st.header("✂️ 이미지 크롭" if crop else "⬛ 이미지 여백 추가")
+    st.caption("원본 이미지를 확대/축소하지 않고 선택한 비율로 크롭합니다." if crop else "원본 이미지를 확대/축소하지 않고 검은색 RGB(0,0,0) 여백을 추가합니다.")
+    fmt = st.radio("변환할 이미지 비율", ["4:5", "9:16"], horizontal=True, key=f"{prefix}_format")
+    files = st.file_uploader("크롭할 이미지를 선택하세요" if crop else "여백을 추가할 이미지를 선택하세요", type=IMAGE_TYPES, accept_multiple_files=True, key=f"{prefix}_uploader")
+    hpos = vpos = "중앙"
+    if crop:
+        hpos = st.radio("좌우 크롭 기준", ["좌측", "중앙", "우측"], horizontal=True, key="image_crop_horizontal")
+        vpos = st.radio("상하 크롭 기준", ["상단", "중앙", "하단"], horizontal=True, key="image_crop_vertical")
+    if not files:
+        return
+    st.subheader("🖼️ 크롭 결과" if crop else "🖼️ 여백 추가 결과")
+    for i, upload in enumerate(files):
+        try:
+            img = load_image(upload)
+            w, h = img.size
+            if crop:
+                pos = hpos if w/h > target_ratio(fmt) else vpos
+                out = crop_image(img, fmt, pos)
+                direction = pos
+            else:
+                out, direction = pad_image(img, fmt)
+            nw, nh = out.size
+            st.write(f"**{upload.name}**")
+            st.caption(f"원본: {w} × {h} → 결과: {nw} × {nh} / {fmt} / {direction}")
+            st.image(preview_image(out), use_container_width=True)
+            ext = os.path.splitext(upload.name)[1].lower()
+            # 개별 파일은 클릭 시 원본 해상도 그대로 저장
+            data, output_ext, mime = image_bytes(out, ext)
+            name = os.path.splitext(upload.name)[0]
+            suffix = "" if crop else "_black_padding"
+            st.download_button(f"⬇️ {upload.name} 다운로드", data, file_name=f"{name}_{fmt.replace(':','x')}{suffix}{output_ext}", mime=mime, key=f"{prefix}_download_{i}")
+            img.close()
+            out.close()
+            st.divider()
+        except Exception as e:
+            st.error(f"❌ {upload.name}: 이미지 처리 중 오류가 발생했습니다.")
+            st.caption(str(e))
+    # ZIP은 요청할 때만 생성하고 설정/파일이 바뀌면 이전 결과를 숨김
+    signature = (fmt, hpos, vpos, tuple(file_identity(f) for f in files))
+    key = f"{prefix}_zip"
+    if st.button("📦 전체 다운로드 준비", key=f"{prefix}_prepare", use_container_width=True):
+        zbuf = BytesIO()
+        count = 0
+        with st.spinner("ZIP 파일 생성 중..."):
+            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as archive:
+                for upload in files:
+                    try:
+                        img = load_image(upload)
+                        w, h = img.size
+                        if crop:
+                            out = crop_image(img, fmt, hpos if w/h > target_ratio(fmt) else vpos)
+                        else:
+                            out, _ = pad_image(img, fmt)
+                        data, output_ext, _ = image_bytes(out, os.path.splitext(upload.name)[1].lower())
+                        name = os.path.splitext(upload.name)[0]
+                        suffix = "" if crop else "_black_padding"
+                        archive.writestr(f"{name}_{fmt.replace(':','x')}{suffix}{output_ext}", data)
+                        count += 1
+                        img.close()
+                        out.close()
+                    except Exception as e:
+                        st.warning(f"{upload.name}: ZIP 추가 실패 ({e})")
+        st.session_state[key] = (signature, zbuf.getvalue(), count)
+    result = st.session_state.get(key)
+    if result and result[0] == signature and result[2] > 0:
+        suffix = "cropped_images" if crop else "black_padding_images"
+        st.download_button(f"⬇️ 전체 {fmt} 이미지 다운로드 ({result[2]}개)", result[1], file_name=f"{fmt.replace(':','x')}_{suffix}.zip", mime="application/zip", use_container_width=True, key=f"{prefix}_zip_download")
+
+
+@st.fragment
+def video_section(mode):
+    crop = mode == "crop"
+    prefix = "video_crop" if crop else "video_padding"
+    st.header("🎬 영상 크롭" if crop else "🎬 영상 여백 추가")
+    st.caption("원본 영상을 확대/축소하지 않고 선택한 비율의 영역만 크롭합니다. 영상은 한 번에 1개씩 처리합니다." if crop else "원본 영상을 확대/축소하지 않고 검은색 여백을 추가하여 선택한 비율로 만듭니다. 영상은 한 번에 1개씩 처리합니다.")
+    fmt = st.radio("변환할 영상 비율", ["4:5", "9:16"], horizontal=True, key=f"{prefix}_format")
+    if not shutil.which("ffmpeg"):
+        st.error("FFmpeg가 설치되어 있지 않습니다. packages.txt에 ffmpeg를 추가해주세요.")
+    upload = st.file_uploader("크롭할 영상을 선택하세요" if crop else "여백을 추가할 영상을 선택하세요", type=VIDEO_TYPES, key=f"{prefix}_uploader")
+    if not upload:
+        return
+    w, h, fps, duration = get_video_info(upload)
+    if not w or not h:
+        st.error("영상 정보를 읽을 수 없습니다.")
+        return
+    st.caption(f"원본: {w} × {h} / {ratio_label(w,h)} / {duration:.1f}초")
+    position = "중앙"
+    if crop:
+        if w/h > target_ratio(fmt):
+            position = st.radio("크롭 기준", ["좌측", "중앙", "우측"], horizontal=True, key=f"{prefix}_horizontal")
+        elif w/h < target_ratio(fmt):
+            position = st.radio("크롭 기준", ["상단", "중앙", "하단"], horizontal=True, key=f"{prefix}_vertical")
         else:
-            st.info(
-                f"업로드한 영상이 이미 "
-                f"{video_crop_target} 비율입니다."
-            )
-
-    if st.button(
-        f"🎬 {video_crop_target} 영상 크롭 시작",
-        use_container_width=True,
-        key="start_video_crop"
-    ):
-
-        if not ffmpeg_available():
-            st.error(
-                "FFmpeg가 설치되어 있지 않습니다."
-            )
-
-        elif video_w <= 0 or video_h <= 0:
-            st.error(
-                "영상 정보를 읽을 수 없습니다."
-            )
-
+            st.info(f"업로드한 영상이 이미 {fmt} 비율입니다.")
+    else:
+        direction = "상하 검은 여백" if w/h > target_ratio(fmt) else "좌우 검은 여백" if w/h < target_ratio(fmt) else "여백 추가 불필요"
+        st.info(f"목표 비율: **{fmt}**  \n원본: **{w} × {h}**  \n적용 방식: **{direction}**")
+    signature = (file_identity(upload), fmt, position)
+    result_key = f"{prefix}_result"
+    if st.button(f"🎬 {fmt} 영상 {'크롭' if crop else '여백 추가'} 시작", use_container_width=True, key=f"{prefix}_start"):
+        if not shutil.which("ffmpeg"):
+            st.error("FFmpeg가 설치되어 있지 않습니다.")
         else:
             try:
-                with st.spinner(
-                    f"{video_crop_file.name} "
-                    f"{video_crop_target} 크롭 중..."
-                ):
-                    (
-                        result_data,
-                        original_w,
-                        original_h,
-                        result_w,
-                        result_h,
-                        fps
-                    ) = process_video(
-                        video_crop_file,
-                        "crop",
-                        video_crop_target,
-                        video_crop_position
-                    )
-
-                ratio_filename = (
-                    video_crop_target.replace(":", "x")
-                )
-
-                original_name = os.path.splitext(
-                    video_crop_file.name
-                )[0]
-
-                st.session_state["video_crop_result"] = {
-                    "data": result_data,
-                    "file_name": (
-                        f"{original_name}_"
-                        f"{ratio_filename}_crop.mp4"
-                    ),
-                    "source_name": video_crop_file.name,
-                    "original_w": original_w,
-                    "original_h": original_h,
-                    "result_w": result_w,
-                    "result_h": result_h,
-                    "target": video_crop_target
-                }
-
+                with st.spinner("영상 변환 중..."):
+                    data, original, output = transform_video(upload, fmt, mode, position)
+                base = os.path.splitext(upload.name)[0]
+                ending = "crop" if crop else "black_padding"
+                st.session_state[result_key] = (signature, data, f"{base}_{fmt.replace(':','x')}_{ending}.mp4", original, output)
             except Exception as e:
-                st.session_state.pop(
-                    "video_crop_result",
-                    None
-                )
-                st.error(
-                    f"❌ {video_crop_file.name}: "
-                    f"영상 크롭 실패"
-                )
+                st.session_state.pop(result_key, None)
+                st.error("❌ 영상 변환 실패")
                 st.caption(str(e))
-
-    crop_result = st.session_state.get(
-        "video_crop_result"
-    )
-
-    if (
-        crop_result
-        and crop_result["source_name"]
-        == video_crop_file.name
-        and crop_result["target"]
-        == video_crop_target
-    ):
-        st.success("✅ 영상 크롭 완료")
-
-        st.caption(
-            f"원본: "
-            f"{crop_result['original_w']} × "
-            f"{crop_result['original_h']}"
-            f" → 결과: "
-            f"{crop_result['result_w']} × "
-            f"{crop_result['result_h']}"
-            f" / "
-            f"{get_ratio_str(crop_result['result_w'], crop_result['result_h'])}"
-        )
-
-        st.download_button(
-            label="⬇️ 크롭 영상 다운로드",
-            data=crop_result["data"],
-            file_name=crop_result["file_name"],
-            mime="video/mp4",
-            use_container_width=True,
-            key="video_crop_download"
-        )
+    result = st.session_state.get(result_key)
+    if result and result[0] == signature:
+        st.success("✅ 영상 변환 완료")
+        st.caption(f"원본: {result[3][0]} × {result[3][1]} → 결과: {result[4][0]} × {result[4][1]} / {ratio_label(*result[4])}")
+        st.download_button("⬇️ 크롭 영상 다운로드" if crop else "⬇️ 여백 영상 다운로드", result[1], file_name=result[2], mime="video/mp4", use_container_width=True, key=f"{prefix}_download")
 
 
-# =========================================================
-# 5. 영상 검은 여백
-# =========================================================
-
+st.title("📏 광고 소재 사이즈 검수 툴")
+st.caption("업로드하신 소재의 비율을 자동으로 체크합니다.")
+st.markdown("상세 내용은 [**[ 광고 소재 가이드 ]**](https://fastpaepr.myportfolio.com/1696f1f311accb) 확인 부탁드립니다.")
+validation_section()
 st.divider()
-
-st.header("🎬 영상 여백 추가")
-
-st.caption(
-    "원본 영상을 확대/축소하지 않고 "
-    "검은색 여백을 추가하여 선택한 비율로 만듭니다. "
-    "영상은 한 번에 1개씩 처리합니다."
-)
-
-video_padding_target = st.radio(
-    "변환할 영상 비율",
-    ["4:5", "9:16"],
-    horizontal=True,
-    key="video_padding_target"
-)
-
-video_padding_file = st.file_uploader(
-    "여백을 추가할 영상을 선택하세요",
-    type=["mp4", "mov", "avi"],
-    accept_multiple_files=False,
-    key="video_padding_uploader"
-)
-
-if video_padding_file:
-
-    padding_ext = os.path.splitext(
-        video_padding_file.name
-    )[1].lower()
-
-    (
-        padding_w,
-        padding_h,
-        padding_fps,
-        padding_duration
-    ) = get_video_dimensions(
-        video_padding_file,
-        padding_ext
-    )
-
-    if padding_w > 0 and padding_h > 0:
-
-        padding_current_ratio = (
-            padding_w / padding_h
-        )
-
-        padding_target_ratio = (
-            get_target_ratio(
-                video_padding_target
-            )
-        )
-
-        if (
-            padding_current_ratio
-            > padding_target_ratio
-        ):
-            padding_direction_text = (
-                "상하 검은 여백"
-            )
-
-        elif (
-            padding_current_ratio
-            < padding_target_ratio
-        ):
-            padding_direction_text = (
-                "좌우 검은 여백"
-            )
-
-        else:
-            padding_direction_text = (
-                "여백 추가 불필요"
-            )
-
-        st.info(
-            f"목표 비율: **{video_padding_target}**  \n"
-            f"원본: **{padding_w} × {padding_h}**  \n"
-            f"적용 방식: **{padding_direction_text}**"
-        )
-
-    if st.button(
-        f"🎬 {video_padding_target} 영상 여백 추가 시작",
-        use_container_width=True,
-        key="start_video_padding"
-    ):
-
-        if not ffmpeg_available():
-            st.error(
-                "FFmpeg가 설치되어 있지 않습니다."
-            )
-
-        elif padding_w <= 0 or padding_h <= 0:
-            st.error(
-                "영상 정보를 읽을 수 없습니다."
-            )
-
-        else:
-            try:
-                with st.spinner(
-                    f"{video_padding_file.name} "
-                    f"{video_padding_target} "
-                    f"여백 추가 중..."
-                ):
-                    (
-                        result_data,
-                        original_w,
-                        original_h,
-                        result_w,
-                        result_h,
-                        fps
-                    ) = process_video(
-                        video_padding_file,
-                        "padding",
-                        video_padding_target
-                    )
-
-                ratio_filename = (
-                    video_padding_target.replace(":", "x")
-                )
-
-                original_name = os.path.splitext(
-                    video_padding_file.name
-                )[0]
-
-                st.session_state[
-                    "video_padding_result"
-                ] = {
-                    "data": result_data,
-                    "file_name": (
-                        f"{original_name}_"
-                        f"{ratio_filename}_"
-                        f"black_padding.mp4"
-                    ),
-                    "source_name": video_padding_file.name,
-                    "original_w": original_w,
-                    "original_h": original_h,
-                    "result_w": result_w,
-                    "result_h": result_h,
-                    "target": video_padding_target
-                }
-
-            except Exception as e:
-                st.session_state.pop(
-                    "video_padding_result",
-                    None
-                )
-                st.error(
-                    f"❌ {video_padding_file.name}: "
-                    f"영상 여백 추가 실패"
-                )
-                st.caption(str(e))
-
-    padding_result = st.session_state.get(
-        "video_padding_result"
-    )
-
-    if (
-        padding_result
-        and padding_result["source_name"]
-        == video_padding_file.name
-        and padding_result["target"]
-        == video_padding_target
-    ):
-        st.success("✅ 영상 여백 추가 완료")
-
-        st.caption(
-            f"원본: "
-            f"{padding_result['original_w']} × "
-            f"{padding_result['original_h']}"
-            f" → 결과: "
-            f"{padding_result['result_w']} × "
-            f"{padding_result['result_h']}"
-            f" / "
-            f"{get_ratio_str(padding_result['result_w'], padding_result['result_h'])}"
-        )
-
-        st.download_button(
-            label="⬇️ 여백 영상 다운로드",
-            data=padding_result["data"],
-            file_name=padding_result["file_name"],
-            mime="video/mp4",
-            use_container_width=True,
-            key="video_padding_download"
-        )
-
+option = st.session_state.get("check_type", "이미지")
+st.info(f"**💡 {option} 안내사항**\n\n- 다른 사이즈로 전달 주신 경우 위아래가 잘릴 수 있습니다.\n- 소재 위아래가 잘려 업로드 되더라도 이상이 없다면 진행하셔도 무관합니다.\n- **캐러셀 내 영상이 가로형(16:9)일 경우**: 위아래 검은색 바를 추가하여 4:5로 업로드 가능합니다.\n- **주의**: 패스트페이퍼에서 별도 영상을 수정할 수 없습니다. 브랜드 측에서 수정하여 전달 필요합니다.")
+st.warning("**📢 공통 안내사항**\n\n1. 메타 가이드 상 해시태그는 **'#광고'를 포함한 5개까지** 가능합니다. (추가적인 해시태그는 댓글로 작성이 가능합니다.)\n\n2. 릴스 소재로 여러 미디어에 노출 시, 메타에서 '추천하지 않는 게시글'로 분류할 가능성이 있습니다. 이미지 에셋과 함께 **캐러셀 형태를 권장**드립니다. *이 내용은 매체 가이드가 아닌 메타 가이드인 점 참고 부탁드립니다.*")
+st.divider()
+image_section("crop")
+st.divider()
+image_section("padding")
+st.divider()
+video_section("crop")
+st.divider()
+video_section("padding")
