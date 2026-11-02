@@ -99,7 +99,7 @@ def crop_image(img, fmt, position):
     return img.crop((0, y, w, y+new_h))
 
 
-def pad_image(img, fmt):
+def pad_image(img, fmt, bg_color="검은색"):
     w, h = img.size
     ratio = target_ratio(fmt)
     if abs(w/h - ratio) < .001:
@@ -108,7 +108,7 @@ def pad_image(img, fmt):
         new_w, new_h, label = w, round(w/ratio), "상하 여백"
     else:
         new_w, new_h, label = round(h*ratio), h, "좌우 여백"
-    canvas = Image.new("RGB", (new_w, new_h), "black")
+    canvas = Image.new("RGB", (new_w, new_h), "white" if bg_color == "흰색" else "black")
     x, y = (new_w-w)//2, (new_h-h)//2
     if img.mode == "RGBA":
         canvas.paste(img, (x, y), img)
@@ -131,7 +131,7 @@ def image_bytes(img, extension):
     return out.getvalue(), ".jpg", "image/jpeg"
 
 
-def video_filter(w, h, fmt, mode, position="중앙"):
+def video_filter(w, h, fmt, mode, position="중앙", bg_color="검은색"):
     ratio = target_ratio(fmt)
     if mode == "crop":
         if abs(w/h-ratio) < .001:
@@ -145,16 +145,17 @@ def video_filter(w, h, fmt, mode, position="중앙"):
         return f"crop={w}:{ch}:0:{max(0,y//2*2)}"
     if abs(w/h-ratio) < .001:
         return None
+    color = "white" if bg_color == "흰색" else "black"
     if w/h > ratio:
         nh = max(h, int(w/ratio + .999999))
         nh += nh % 2
-        return f"pad={w}:{nh}:0:(oh-ih)/2:black"
+        return f"pad={w}:{nh}:0:(oh-ih)/2:{color}"
     nw = max(w, int(h*ratio + .999999))
     nw += nw % 2
-    return f"pad={nw}:{h}:(ow-iw)/2:0:black"
+    return f"pad={nw}:{h}:(ow-iw)/2:0:{color}"
 
 
-def transform_video(upload, fmt, mode, position):
+def transform_video(upload, fmt, mode, position, bg_color="검은색"):
     src = dst = None
     try:
         src = temp_upload(upload)
@@ -166,7 +167,7 @@ def transform_video(upload, fmt, mode, position):
         cap.release()
         if not w or not h:
             raise RuntimeError("영상 해상도를 확인할 수 없습니다.")
-        filt = video_filter(w, h, fmt, mode, position)
+        filt = video_filter(w, h, fmt, mode, position, bg_color)
         if filt is None:
             # 비율이 이미 일치하면 재인코딩 없이 MP4로 remux
             filt = None
@@ -240,7 +241,7 @@ def validation_section():
             elif abs(r-.8)<.05:
                 results.append(f"✅ {upload.name}: 이상없음 ({w}x{h}, {label})")
             elif abs(r-16/9)<.1:
-                results.append(f"❌ {upload.name}: 가로형(16:9) 영상입니다. 위아래 검은색 바를 추가하여 4:5 비율로 수정 후 전달 부탁드립니다. (패스트페이퍼 수정 불가, 현재 {w}x{h})")
+                results.append(f"❌ {upload.name}: 가로형(16:9) 영상입니다. 위아래 검은색 또는 흰색 바를 추가하여 4:5 비율로 수정 후 전달 부탁드립니다. (패스트페이퍼 수정 불가, 현재 {w}x{h})")
             else:
                 results.append(f"⚠️ {upload.name}: 4:5 비율이 아닙니다. 그대로 진행 시 위아래가 잘릴 수 있습니다. (현재 {w}x{h}, {label})")
         else:
@@ -254,10 +255,11 @@ def validation_section():
 def image_section(mode):
     crop = mode == "crop"
     prefix = "crop" if crop else "padding"
-    st.header("✂️ 이미지 크롭" if crop else "⬛ 이미지 여백 추가")
-    st.caption("원본 이미지를 확대/축소하지 않고 선택한 비율로 크롭합니다." if crop else "원본 이미지를 확대/축소하지 않고 검은색 RGB(0,0,0) 여백을 추가합니다.")
+    st.header("✂️ 이미지 크롭" if crop else "⬜ 이미지 여백 추가")
+    st.caption("원본 이미지를 확대/축소하지 않고 선택한 비율로 크롭합니다." if crop else "원본 이미지를 확대/축소하지 않고 선택한 색상의 여백을 추가합니다.")
     fmt = st.radio("변환할 이미지 비율", ["4:5", "9:16"], horizontal=True, key=f"{prefix}_format")
     files = st.file_uploader("크롭할 이미지를 선택하세요" if crop else "여백을 추가할 이미지를 선택하세요", type=IMAGE_TYPES, accept_multiple_files=True, key=f"{prefix}_uploader")
+    bg_color = "검은색" if crop else st.radio("여백 색상", ["검은색", "흰색"], horizontal=True, key=f"{prefix}_color")
     hpos = vpos = "중앙"
     if crop:
         hpos = st.radio("좌우 크롭 기준", ["좌측", "중앙", "우측"], horizontal=True, key="image_crop_horizontal")
@@ -274,7 +276,7 @@ def image_section(mode):
                 out = crop_image(img, fmt, pos)
                 direction = pos
             else:
-                out, direction = pad_image(img, fmt)
+                out, direction = pad_image(img, fmt, bg_color)
             nw, nh = out.size
             st.write(f"**{upload.name}**")
             st.caption(f"원본: {w} × {h} → 결과: {nw} × {nh} / {fmt} / {direction}")
@@ -283,7 +285,7 @@ def image_section(mode):
             # 개별 파일은 클릭 시 원본 해상도 그대로 저장
             data, output_ext, mime = image_bytes(out, ext)
             name = os.path.splitext(upload.name)[0]
-            suffix = "" if crop else "_black_padding"
+            suffix = "" if crop else ("_white_padding" if bg_color == "흰색" else "_black_padding")
             st.download_button(f"⬇️ {upload.name} 다운로드", data, file_name=f"{name}_{fmt.replace(':','x')}{suffix}{output_ext}", mime=mime, key=f"{prefix}_download_{i}")
             img.close()
             out.close()
@@ -292,7 +294,7 @@ def image_section(mode):
             st.error(f"❌ {upload.name}: 이미지 처리 중 오류가 발생했습니다.")
             st.caption(str(e))
     # ZIP은 요청할 때만 생성하고 설정/파일이 바뀌면 이전 결과를 숨김
-    signature = (fmt, hpos, vpos, tuple(file_identity(f) for f in files))
+    signature = (fmt, hpos, vpos, bg_color, tuple(file_identity(f) for f in files))
     key = f"{prefix}_zip"
     if st.button("📦 전체 다운로드 준비", key=f"{prefix}_prepare", use_container_width=True):
         zbuf = BytesIO()
@@ -306,10 +308,10 @@ def image_section(mode):
                         if crop:
                             out = crop_image(img, fmt, hpos if w/h > target_ratio(fmt) else vpos)
                         else:
-                            out, _ = pad_image(img, fmt)
+                            out, _ = pad_image(img, fmt, bg_color)
                         data, output_ext, _ = image_bytes(out, os.path.splitext(upload.name)[1].lower())
                         name = os.path.splitext(upload.name)[0]
-                        suffix = "" if crop else "_black_padding"
+                        suffix = "" if crop else ("_white_padding" if bg_color == "흰색" else "_black_padding")
                         archive.writestr(f"{name}_{fmt.replace(':','x')}{suffix}{output_ext}", data)
                         count += 1
                         img.close()
@@ -319,7 +321,7 @@ def image_section(mode):
         st.session_state[key] = (signature, zbuf.getvalue(), count)
     result = st.session_state.get(key)
     if result and result[0] == signature and result[2] > 0:
-        suffix = "cropped_images" if crop else "black_padding_images"
+        suffix = "cropped_images" if crop else ("white_padding_images" if bg_color == "흰색" else "black_padding_images")
         st.download_button(f"⬇️ 전체 {fmt} 이미지 다운로드 ({result[2]}개)", result[1], file_name=f"{fmt.replace(':','x')}_{suffix}.zip", mime="application/zip", use_container_width=True, key=f"{prefix}_zip_download")
 
 
@@ -328,8 +330,9 @@ def video_section(mode):
     crop = mode == "crop"
     prefix = "video_crop" if crop else "video_padding"
     st.header("🎬 영상 크롭" if crop else "🎬 영상 여백 추가")
-    st.caption("원본 영상을 확대/축소하지 않고 선택한 비율의 영역만 크롭합니다. 영상은 한 번에 1개씩 처리합니다." if crop else "원본 영상을 확대/축소하지 않고 검은색 여백을 추가하여 선택한 비율로 만듭니다. 영상은 한 번에 1개씩 처리합니다.")
+    st.caption("원본 영상을 확대/축소하지 않고 선택한 비율의 영역만 크롭합니다. 영상은 한 번에 1개씩 처리합니다." if crop else "원본 영상을 확대/축소하지 않고 선택한 색상의 여백을 추가하여 선택한 비율로 만듭니다. 영상은 한 번에 1개씩 처리합니다.")
     fmt = st.radio("변환할 영상 비율", ["4:5", "9:16"], horizontal=True, key=f"{prefix}_format")
+    bg_color = "검은색" if crop else st.radio("여백 색상", ["검은색", "흰색"], horizontal=True, key=f"{prefix}_color")
     if not shutil.which("ffmpeg"):
         st.error("FFmpeg가 설치되어 있지 않습니다. packages.txt에 ffmpeg를 추가해주세요.")
     upload = st.file_uploader("크롭할 영상을 선택하세요" if crop else "여백을 추가할 영상을 선택하세요", type=VIDEO_TYPES, key=f"{prefix}_uploader")
@@ -349,9 +352,9 @@ def video_section(mode):
         else:
             st.info(f"업로드한 영상이 이미 {fmt} 비율입니다.")
     else:
-        direction = "상하 검은 여백" if w/h > target_ratio(fmt) else "좌우 검은 여백" if w/h < target_ratio(fmt) else "여백 추가 불필요"
+        direction = f"상하 {bg_color} 여백" if w/h > target_ratio(fmt) else f"좌우 {bg_color} 여백" if w/h < target_ratio(fmt) else "여백 추가 불필요"
         st.info(f"목표 비율: **{fmt}**  \n원본: **{w} × {h}**  \n적용 방식: **{direction}**")
-    signature = (file_identity(upload), fmt, position)
+    signature = (file_identity(upload), fmt, position, bg_color)
     result_key = f"{prefix}_result"
     if st.button(f"🎬 {fmt} 영상 {'크롭' if crop else '여백 추가'} 시작", use_container_width=True, key=f"{prefix}_start"):
         if not shutil.which("ffmpeg"):
@@ -359,9 +362,9 @@ def video_section(mode):
         else:
             try:
                 with st.spinner("영상 변환 중..."):
-                    data, original, output = transform_video(upload, fmt, mode, position)
+                    data, original, output = transform_video(upload, fmt, mode, position, bg_color)
                 base = os.path.splitext(upload.name)[0]
-                ending = "crop" if crop else "black_padding"
+                ending = "crop" if crop else ("white_padding" if bg_color == "흰색" else "black_padding")
                 st.session_state[result_key] = (signature, data, f"{base}_{fmt.replace(':','x')}_{ending}.mp4", original, output)
             except Exception as e:
                 st.session_state.pop(result_key, None)
@@ -380,7 +383,7 @@ st.markdown("상세 내용은 [**[ 광고 소재 가이드 ]**](https://fastpaep
 validation_section()
 st.divider()
 option = st.session_state.get("check_type", "이미지")
-st.info(f"**💡 {option} 안내사항**\n\n- 다른 사이즈로 전달 주신 경우 위아래가 잘릴 수 있습니다.\n- 소재 위아래가 잘려 업로드 되더라도 이상이 없다면 진행하셔도 무관합니다.\n- **캐러셀 내 영상이 가로형(16:9)일 경우**: 위아래 검은색 바를 추가하여 4:5로 업로드 가능합니다.\n- **주의**: 패스트페이퍼에서 별도 영상을 수정할 수 없습니다. 브랜드 측에서 수정하여 전달 필요합니다.")
+st.info(f"**💡 {option} 안내사항**\n\n- 다른 사이즈로 전달 주신 경우 위아래가 잘릴 수 있습니다.\n- 소재 위아래가 잘려 업로드 되더라도 이상이 없다면 진행하셔도 무관합니다.\n- **캐러셀 내 영상이 가로형(16:9)일 경우**: 위아래 검은색 또는 흰색 바를 추가하여 4:5로 업로드 가능합니다.\n- **주의**: 패스트페이퍼에서 별도 영상을 수정할 수 없습니다. 브랜드 측에서 수정하여 전달 필요합니다.")
 st.warning("**📢 공통 안내사항**\n\n1. 메타 가이드 상 해시태그는 **'#광고'를 포함한 5개까지** 가능합니다. (추가적인 해시태그는 댓글로 작성이 가능합니다.)\n\n2. 릴스 소재로 여러 미디어에 노출 시, 메타에서 '추천하지 않는 게시글'로 분류할 가능성이 있습니다. 이미지 에셋과 함께 **캐러셀 형태를 권장**드립니다. *이 내용은 매체 가이드가 아닌 메타 가이드인 점 참고 부탁드립니다.*")
 st.divider()
 image_section("crop")
